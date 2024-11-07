@@ -1,5 +1,5 @@
 import asyncio
-from typing import List, Optional
+from typing import List, Optional, Dict
 import asyncpg
 import redis.asyncio as redis
 from datetime import datetime
@@ -9,13 +9,13 @@ import logging
 
 from .config import settings
 from .feature_processor import FeatureProcessor
-from .tf_recommender import TensorFlowRecommender
+from .recommender import Recommender
 
 
 class RecommenderService:
     def __init__(self):
         self.feature_processor = FeatureProcessor()
-        self.recommender = TensorFlowRecommender()
+        self.recommender = Recommender()
         self.redis = None
         self.pg_pool = None
         self.is_updating = False
@@ -37,38 +37,169 @@ class RecommenderService:
         # Start background update task
         asyncio.create_task(self.periodic_model_update())
 
-    async def get_recommendations(self, user_id: str, top_k: int = 5) -> List[str]:
+    async def get_recommendations(self, user_id: str, top_k: int = 5) -> Dict:
         if not self._model_ready:
             raise HTTPException(status_code=503, detail="Model not ready")
 
         try:
-            # Check if user exists
             async with self.pg_pool.acquire() as conn:
+                # Get user data with more details
                 user = await conn.fetchrow(
-                    "SELECT * FROM user_features WHERE user_id = $1", user_id
+                    """
+                    SELECT
+                        id,
+                        email,
+                        interest,
+                        learning_style,
+                        city
+                    FROM users
+                    WHERE id = $1
+                """,
+                    user_id,
                 )
+
                 if not user:
                     raise ValueError(f"User {user_id} not found")
 
-            # Try cache first
-            cache_key = f"recommendations:{user_id}"
-            cached = await self.redis.get(cache_key)
-            if cached:
-                return cached.split(",")
+                user_vector = self.feature_processor.process_user_features(
+                    {
+                        "interest": user["interest"],
+                        "learning_style": user["learning_style"],
+                        "city": user["city"],
+                    }
+                )
 
-            # Process user features
-            user_vector = self.feature_processor.process_user_features(dict(user))
-            self.recommender.update_single_user(user_id, user_vector)
+                self.recommender.update_single_user(user_id, user_vector)
+                tutor_ids = self.recommender.get_recommendations(user_id, top_k)
+                tutor_ids_str = [str(tid) for tid in tutor_ids]
 
-            # Get recommendations
-            recommendations = self.recommender.get_recommendations(user_id, top_k)
+                recommended_tutors = await conn.fetch(
+                    """
+                    WITH user_interests AS (
+                        SELECT unnest(interest) as interest
+                        FROM users
+                        WHERE id = $1
+                    ),
+                    ranked_tutors AS (
+                        SELECT
+                            t.id::text,
+                            t.email,
+                            ts.subject,
+                            ts.specialization,
+                            ts.teaching_style,
+                            ts.hourly_rate::float,
+                            t.latitude,
+                            t.longitude,
+                            COALESCE(AVG(sr.session_rating)::float, 0.0) as average_rating,
+                            COUNT(sr.session_rating)::int as num_ratings,
+                            EXISTS (
+                                SELECT 1 FROM user_interests
+                                WHERE LOWER(interest) = LOWER(ts.subject)
+                            ) as exact_match,
+                            EXISTS (
+                                SELECT 1 FROM user_interests
+                                WHERE LOWER(ts.subject) LIKE LOWER('%' || interest || '%')
+                                OR LOWER(interest) LIKE LOWER('%' || ts.subject || '%')
+                            ) as partial_match,
+                            array_agg(DISTINCT sr.session_rating) as ratings
+                        FROM tutor t
+                        JOIN tutor_service ts ON t.id = ts.tutor_id
+                        LEFT JOIN session_rating sr ON ts.id = sr.service_id
+                        WHERE t.id::text = ANY($2)
+                        GROUP BY
+                            t.id,
+                            t.email,
+                            ts.subject,
+                            ts.specialization,
+                            ts.teaching_style,
+                            ts.hourly_rate,
+                            t.latitude,
+                            t.longitude
+                    )
+                    SELECT *,
+                        CASE
+                            WHEN exact_match THEN 1
+                            WHEN partial_match THEN 2
+                            ELSE 3
+                        END as match_rank
+                    FROM ranked_tutors
+                    ORDER BY
+                        match_rank ASC,                    -- Primary sort: exact subject matches first
+                        array_length(specialization, 1) DESC,  -- Secondary sort: more specializations
+                        CASE
+                            WHEN average_rating >= 4.0 AND num_ratings >= 3 THEN 1
+                            WHEN average_rating >= 3.5 THEN 2
+                            ELSE 3
+                        END,                               -- Tertiary sort: rating tier
+                        average_rating DESC,               -- Final sort: specific rating
+                        num_ratings DESC                   -- Then by number of ratings
+                    """,
+                    user_id,
+                    tutor_ids_str,
+                )
 
-            # Cache results
-            if recommendations:
-                await self.redis.set(cache_key, ",".join(recommendations))
-                await self.redis.expire(cache_key, settings.CACHE_TTL)
+                # Process recommendations with stronger interest matching
+                matched_recommendations = []
+                partial_matched_recommendations = []
+                other_recommendations = []
 
-            return recommendations
+                # Track subjects to avoid duplicates while maintaining best rated tutors per subject
+                subject_seen = set()
+
+                for tutor in recommended_tutors:
+                    subject = tutor["subject"].lower()
+
+                    # Skip if we already have a tutor for this subject
+                    if subject in subject_seen:
+                        continue
+
+                    recommendation = {
+                        "id": str(tutor["id"]),
+                        "email": tutor["email"],
+                        "subject": tutor["subject"],
+                        "specialization": tutor["specialization"],
+                        "teaching_style": tutor["teaching_style"],
+                        "hourly_rate": float(tutor["hourly_rate"]),
+                        "average_rating": float(tutor["average_rating"]),
+                        "num_ratings": int(tutor["num_ratings"]),
+                        "match_reasons": self._get_match_reasons(
+                            user["interest"],
+                            user["learning_style"],
+                            tutor["subject"],
+                            tutor["teaching_style"],
+                            tutor["average_rating"],
+                        ),
+                    }
+
+                    if tutor["exact_match"]:
+                        matched_recommendations.append(recommendation)
+                        subject_seen.add(subject)
+                    elif tutor["partial_match"] and subject not in subject_seen:
+                        partial_matched_recommendations.append(recommendation)
+                        subject_seen.add(subject)
+                    elif subject not in subject_seen:
+                        other_recommendations.append(recommendation)
+                        subject_seen.add(subject)
+
+                # Combine recommendations prioritizing subject matches
+                final_recommendations = (
+                    matched_recommendations  # Exact subject matches first
+                    + partial_matched_recommendations  # Related subjects second
+                    + other_recommendations  # Other subjects last
+                )[:top_k]
+
+                response = {
+                    "user": {
+                        "id": str(user["id"]),
+                        "email": user["email"],
+                        "interests": user["interest"],
+                        "learning_style": user["learning_style"],
+                        "city": user["city"],
+                    },
+                    "recommendations": final_recommendations,
+                }
+
+                return response
 
         except ValueError as e:
             logging.error(f"User not found: {user_id}")
@@ -77,53 +208,172 @@ class RecommenderService:
             logging.error(f"Error getting recommendations: {str(e)}", exc_info=True)
             raise HTTPException(status_code=500, detail="Internal server error")
 
+    def _get_match_reasons(
+        self,
+        user_interests: List[str],
+        user_style: str,
+        tutor_subject: str,
+        tutor_style: str,
+        rating: float,
+    ) -> List[str]:
+        reasons = []
+
+        # Ensure user_interests is a list
+        if isinstance(user_interests, str):
+            try:
+                user_interests = json.loads(user_interests)
+            except:
+                user_interests = [user_interests]
+        elif user_interests is None:
+            user_interests = []
+
+        # Subject match with more detailed explanation
+        if any(
+            interest.lower() == tutor_subject.lower() for interest in user_interests
+        ):
+            reasons.append(
+                f"Perfect match: Teaches {tutor_subject} (exactly matches your interest)"
+            )
+        elif any(
+            tutor_subject.lower() in interest.lower()
+            or interest.lower() in tutor_subject.lower()
+            for interest in user_interests
+        ):
+            matching_interests = [
+                interest
+                for interest in user_interests
+                if tutor_subject.lower() in interest.lower()
+                or interest.lower() in tutor_subject.lower()
+            ]
+            reasons.append(
+                f"Related to your interest in {', '.join(matching_interests)}"
+            )
+
+        # Learning style match
+        if user_style and tutor_style:
+            if user_style == tutor_style:
+                reasons.append(
+                    f"Teaching style ({tutor_style}) perfectly matches your learning preference"
+                )
+            elif tutor_style == "flexible":
+                reasons.append("Flexible teaching style that can adapt to your needs")
+            else:
+                reasons.append(
+                    f"Different teaching style ({tutor_style}) might provide new perspectives"
+                )
+
+        # Rating-based reason
+        if rating >= 4.5:
+            reasons.append(f"Highly rated tutor (★ {rating:.1f})")
+        elif rating >= 4.0:
+            reasons.append(f"Well-rated tutor (★ {rating:.1f})")
+        elif rating >= 3.5:
+            reasons.append(f"Above average rating (★ {rating:.1f})")
+
+        return reasons
+
     async def update_model(self):
         if self.is_updating:
             return
 
         self.is_updating = True
         try:
-            async with self.pg_pool.acquire() as conn1, self.pg_pool.acquire() as conn2:
-                users = await conn1.fetch("SELECT * FROM user_features")
-                mentors = await conn2.fetch("SELECT * FROM mentor_features")
+            async with self.pg_pool.acquire() as conn:
+                # Fetch users
+                users = await conn.fetch(
+                    """
+                    SELECT
+                        id::text as user_id,
+                        interest,
+                        learning_style,
+                        city
+                    FROM users
+                """
+                )
 
-            # Process features in batches
-            batch_size = settings.BATCH_SIZE
-            all_texts = []
+                # Fetch tutors with services and ratings with proper type casting
+                tutors = await conn.fetch(
+                    """
+                    SELECT
+                        t.id::text as tutor_id,
+                        t.latitude,
+                        t.longitude,
+                        ts.teaching_style,
+                        ts.subject,
+                        ts.specialization,
+                        ts.hourly_rate::float as hourly_rate,
+                        ts.year_of_experience::int as year_of_experience,
+                        COALESCE(AVG(sr.session_rating)::float, 0.0) as average_rating,
+                        COUNT(sr.session_rating)::int as num_ratings
+                    FROM tutor t
+                    JOIN tutor_service ts ON t.id = ts.tutor_id
+                    LEFT JOIN session_rating sr ON ts.id = sr.service_id
+                    GROUP BY t.id, t.latitude, t.longitude, ts.id, ts.teaching_style,
+                             ts.subject, ts.specialization, ts.hourly_rate,
+                             ts.year_of_experience
+                    ORDER BY average_rating DESC, num_ratings DESC
+                """
+                )
 
-            # Process in chunks to avoid memory issues
-            for i in range(0, len(users), batch_size):
-                batch = users[i : i + batch_size]
-                all_texts.extend([" ".join(user["interests"]) for user in batch])
+                # Process features
+                all_texts = []
+                for user in users:
+                    if user["interest"]:
+                        all_texts.append(" ".join(user["interest"]))
 
-            for i in range(0, len(mentors), batch_size):
-                batch = mentors[i : i + batch_size]
-                all_texts.extend([" ".join(mentor["expertise"]) for mentor in batch])
+                for tutor in tutors:
+                    if tutor["specialization"]:
+                        all_texts.append(" ".join(tutor["specialization"]))
+                    if tutor["subject"]:
+                        all_texts.append(tutor["subject"])
 
-            # Update feature processor
-            self.feature_processor.fit(all_texts)
+                self.feature_processor.fit(all_texts)
 
-            # Process features in batches
-            user_features = {}
-            mentor_features = {}
+                # Process features with proper type handling
+                user_features = {}
+                tutor_features = {}
 
-            for i in range(0, len(users), batch_size):
-                batch = users[i : i + batch_size]
-                for user in batch:
-                    user_features[str(user["user_id"])] = (
-                        self.feature_processor.process_user_features(dict(user))
+                for user in users:
+                    user_features[user["user_id"]] = (
+                        self.feature_processor.process_user_features(
+                            {
+                                "interest": user["interest"],
+                                "learning_style": user["learning_style"],
+                                "city": user["city"],
+                            }
+                        )
                     )
 
-            for i in range(0, len(mentors), batch_size):
-                batch = mentors[i : i + batch_size]
-                for mentor in batch:
-                    mentor_features[str(mentor["mentor_id"])] = (
-                        self.feature_processor.process_mentor_features(dict(mentor))
+                for tutor in tutors:
+                    rating_data = {
+                        "average_rating": float(tutor["average_rating"]),
+                        "num_ratings": int(tutor["num_ratings"]),
+                    }
+
+                    location = (
+                        (float(tutor["latitude"]), float(tutor["longitude"]))
+                        if tutor["latitude"] is not None
+                        and tutor["longitude"] is not None
+                        else None
                     )
 
-            # Update fast recommender
-            self.recommender.build_index(mentor_features)
-            self.recommender.update_user_features(user_features)
+                    tutor_features[tutor["tutor_id"]] = (
+                        self.feature_processor.process_tutor_features(
+                            {"location": location},
+                            {
+                                "teaching_style": tutor["teaching_style"],
+                                "subject": tutor["subject"],
+                                "specialization": tutor["specialization"],
+                                "hourly_rate": float(tutor["hourly_rate"]),
+                                "year_of_experience": int(tutor["year_of_experience"]),
+                            },
+                            rating_data,
+                        )
+                    )
+
+                # Update recommender
+                self.recommender.build_index(tutor_features)
+                self.recommender.update_user_features(user_features)
 
         except Exception as e:
             logging.error(f"Error updating model: {str(e)}")
@@ -135,39 +385,32 @@ class RecommenderService:
     async def record_interaction(
         self,
         user_id: str,
-        mentor_id: str,
-        interaction_type: str,
+        tutor_id: str,
+        service_id: str,
         rating: Optional[float] = None,
     ):
-        interaction_data = {
-            "user_id": user_id,
-            "mentor_id": mentor_id,
-            "interaction_type": interaction_type,
-            "rating": rating,
-            "timestamp": datetime.utcnow().isoformat(),
-        }
+        try:
+            # Store in PostgreSQL
+            async with self.pg_pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO session_rating
+                    (user_id, service_id, session_rating, created_at)
+                    VALUES ($1, $2, $3, $4)
+                """,
+                    user_id,
+                    service_id,
+                    rating,
+                    datetime.utcnow(),
+                )
 
-        # Store in Redis for quick access
-        interaction_key = f"interaction:{user_id}:{mentor_id}"
-        await self.redis.lpush(interaction_key, json.dumps(interaction_data))
+            # Update cache
+            cache_key = f"recommendations:{user_id}"
+            await self.redis.delete(cache_key)
 
-        # Update interaction counts
-        self.interaction_counts[user_id] += 1
-
-        # Store in PostgreSQL for persistence
-        async with self.pg_pool.acquire() as conn:
-            await conn.execute(
-                """
-                INSERT INTO interactions
-                (user_id, mentor_id, interaction_type, rating, created_at)
-                VALUES ($1, $2, $3, $4, $5)
-            """,
-                user_id,
-                mentor_id,
-                interaction_type,
-                rating,
-                datetime.utcnow(),
-            )
+        except Exception as e:
+            logging.error(f"Error recording interaction: {str(e)}")
+            raise
 
     async def trigger_model_update(self):
         if not self.is_updating:

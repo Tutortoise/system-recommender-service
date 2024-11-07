@@ -54,7 +54,7 @@ class InteractionCreate(BaseModel):
 async def get_recommendations(user_id: str, top_k: int = 5):
     try:
         recommendations = await recommender_service.get_recommendations(user_id, top_k)
-        return {"recommendations": recommendations}
+        return recommendations
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:

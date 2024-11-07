@@ -4,7 +4,7 @@ from typing import List, Dict
 import logging
 
 
-class TensorFlowRecommender:
+class Recommender:
     def __init__(self, embedding_dim: int = 32):
         self.embedding_dim = embedding_dim
         self.user_features = {}
