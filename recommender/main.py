@@ -5,16 +5,12 @@ os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"  # Suppress TF logging
 logging.getLogger("tensorflow").setLevel(logging.ERROR)
 
 from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from typing import List, Optional
 import uvicorn
-from datetime import datetime
-import asyncio
 from contextlib import asynccontextmanager
 
 from recommender.service import RecommenderService
-from recommender.config import settings
 
 
 @asynccontextmanager
@@ -27,8 +23,6 @@ async def lifespan(app: FastAPI):
     # Shutdown
     if recommender_service.pg_pool:
         await recommender_service.pg_pool.close()
-    if recommender_service.redis:
-        await recommender_service.redis.close()
 
 
 app = FastAPI(title="Mentor Recommendation API", lifespan=lifespan)
@@ -43,52 +37,122 @@ app.add_middleware(
 )
 
 
-class InteractionCreate(BaseModel):
-    user_id: str
-    mentor_id: str
-    interaction_type: str
-    rating: Optional[float] = None
-
-
 @app.get("/recommendations/{user_id}")
 async def get_recommendations(user_id: str, top_k: int = 5):
     try:
-        recommendations = await recommender_service.get_recommendations(user_id, top_k)
-        return recommendations
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        data = await recommender_service.get_recommendations(user_id, top_k)
+        return JSONResponse(
+            status_code=200,
+            content={
+                "status": "success",
+                "data": data,
+                "code": "RECOMMENDATIONS_FOUND",
+            },
+        )
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "INTERNAL_ERROR",
+                "message": "An unexpected error occurred",
+                "error": str(e),
+            },
+        )
+
+
+@app.post("/model/update")
+async def trigger_model_update(background_tasks: BackgroundTasks):
+    """Manually trigger a model update."""
+    if recommender_service.is_updating:
+        return JSONResponse(
+            status_code=409,
+            content={
+                "status": "error",
+                "code": "UPDATE_IN_PROGRESS",
+                "message": "Model update already in progress",
+            },
+        )
+
+    background_tasks.add_task(recommender_service.update_model)
+    return JSONResponse(
+        status_code=202,
+        content={
+            "status": "success",
+            "code": "UPDATE_SCHEDULED",
+            "message": "Model update scheduled",
+        },
+    )
+
+
+@app.post("/model/reset")
+async def reset_model():
+    """Reset model state and clear caches"""
+    try:
+        # Clear caches
+        recommender_service.recommender.similarity_cache.clear()
+
+        # Reset states
+        recommender_service._model_ready = False
+        recommender_service.is_updating = False
+
+        # Trigger new model update
+        await recommender_service.trigger_model_update()
+
+        return {
+            "status": "success",
+            "message": "Model reset and update triggered",
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/model/status")
+async def get_model_status():
+    """
+    Get the current status of the recommendation model
+    """
+    return {
+        "is_ready": recommender_service._model_ready,
+        "is_updating": recommender_service.is_updating,
+        "feature_dimensions": recommender_service.feature_processor.feature_dim,
+        "total_users": len(recommender_service.recommender.user_features),
+        "total_mentors": len(recommender_service.recommender.mentor_features),
+        "cache_size": len(recommender_service.recommender.similarity_cache),
+    }
 
 
 @app.get("/health")
 async def health_check():
     try:
-        # Check database connection
+        # Properly acquire and use connection
         async with recommender_service.pg_pool.acquire() as conn:
             await conn.fetchval("SELECT 1")
 
-        # Check Redis connection
-        await recommender_service.redis.ping()
-
-        # Check model status
-        model_status = "ready" if recommender_service._model_ready else "not_ready"
-
-        return {
-            "status": "healthy",
-            "timestamp": datetime.utcnow().isoformat(),
-            "database": "connected",
-            "redis": "connected",
-            "model_status": model_status,
-            "is_updating": recommender_service.is_updating,
-        }
+        return JSONResponse(
+            status_code=200,
+            content={
+                "status": "success",
+                "code": "HEALTHY",
+                "data": {
+                    "database": "connected",
+                    "model_status": (
+                        "ready" if recommender_service._model_ready else "not_ready"
+                    ),
+                    "is_updating": recommender_service.is_updating,
+                },
+            },
+        )
     except Exception as e:
-        raise HTTPException(
+        return JSONResponse(
             status_code=503,
-            detail={
-                "status": "unhealthy",
-                "timestamp": datetime.utcnow().isoformat(),
-                "error": str(e),
+            content={
+                "status": "error",
+                "code": "UNHEALTHY",
+                "message": f"Database connection failed: {str(e)}",
+                "error": type(e).__name__,
             },
         )
 

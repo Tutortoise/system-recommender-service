@@ -30,6 +30,16 @@ class Recommender:
             ]
         )
 
+    def reset_caches(self):
+        """Reset all caches and embeddings"""
+        self.similarity_cache.clear()
+        self.mentor_embeddings = None
+        self.mentor_embeddings_np = None
+
+        # Recreate encoders to reset weights
+        self.user_encoder = self._build_encoder("user")
+        self.mentor_encoder = self._build_encoder("mentor")
+
     @tf.function(reduce_retracing=True)
     def _compute_similarities(self, user_embedding, mentor_embeddings):
         # Reshape user embedding to [1, embedding_dim]

@@ -1,11 +1,10 @@
 import asyncio
-from typing import List, Optional, Dict
+from typing import List, Dict
 import asyncpg
-import redis.asyncio as redis
-from datetime import datetime
-from collections import defaultdict
 import json
 import logging
+from uuid import UUID
+from fastapi import HTTPException
 
 from .config import settings
 from .feature_processor import FeatureProcessor
@@ -16,15 +15,12 @@ class RecommenderService:
     def __init__(self):
         self.feature_processor = FeatureProcessor()
         self.recommender = Recommender()
-        self.redis = None
         self.pg_pool = None
         self.is_updating = False
         self._model_ready = False
         self._lock = asyncio.Lock()
-        self.interaction_counts = defaultdict(int)
 
     async def initialize(self):
-        self.redis = await redis.from_url(settings.REDIS_URL, decode_responses=True)
         self.pg_pool = await asyncpg.create_pool(
             settings.POSTGRES_URL, min_size=5, max_size=20
         )
@@ -38,8 +34,26 @@ class RecommenderService:
         asyncio.create_task(self.periodic_model_update())
 
     async def get_recommendations(self, user_id: str, top_k: int = 5) -> Dict:
+        try:
+            UUID(user_id)
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "INVALID_UUID",
+                    "message": "Invalid user ID format. Must be a valid UUID.",
+                    "user_id": user_id,
+                },
+            )
+
         if not self._model_ready:
-            raise HTTPException(status_code=503, detail="Model not ready")
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "SERVICE_UNAVAILABLE",
+                    "message": "Recommendation service is not ready",
+                },
+            )
 
         try:
             async with self.pg_pool.acquire() as conn:
@@ -59,7 +73,14 @@ class RecommenderService:
                 )
 
                 if not user:
-                    raise ValueError(f"User {user_id} not found")
+                    raise HTTPException(
+                        status_code=404,
+                        detail={
+                            "code": "USER_NOT_FOUND",
+                            "message": f"User with ID {user_id} not found",
+                            "user_id": user_id,
+                        },
+                    )
 
                 user_vector = self.feature_processor.process_user_features(
                     {
@@ -201,12 +222,18 @@ class RecommenderService:
 
                 return response
 
-        except ValueError as e:
-            logging.error(f"User not found: {user_id}")
-            raise HTTPException(status_code=404, detail=str(e))
+        except HTTPException:
+            raise
+
         except Exception as e:
             logging.error(f"Error getting recommendations: {str(e)}", exc_info=True)
-            raise HTTPException(status_code=500, detail="Internal server error")
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "code": "INTERNAL_ERROR",
+                    "message": "An unexpected error occurred",
+                },
+            )
 
     def _get_match_reasons(
         self,
@@ -273,11 +300,9 @@ class RecommenderService:
         return reasons
 
     async def update_model(self):
-        if self.is_updating:
-            return
-
-        self.is_updating = True
         try:
+            self.recommender.reset_caches()
+
             async with self.pg_pool.acquire() as conn:
                 # Fetch users
                 users = await conn.fetch(
@@ -375,6 +400,8 @@ class RecommenderService:
                 self.recommender.build_index(tutor_features)
                 self.recommender.update_user_features(user_features)
 
+                self._model_ready = True
+
         except Exception as e:
             logging.error(f"Error updating model: {str(e)}")
             self._model_ready = False
@@ -382,48 +409,35 @@ class RecommenderService:
         finally:
             self.is_updating = False
 
-    async def record_interaction(
-        self,
-        user_id: str,
-        tutor_id: str,
-        service_id: str,
-        rating: Optional[float] = None,
-    ):
+    async def trigger_model_update(self):
+        """Trigger a manual model update"""
         try:
-            # Store in PostgreSQL
-            async with self.pg_pool.acquire() as conn:
-                await conn.execute(
-                    """
-                    INSERT INTO session_rating
-                    (user_id, service_id, session_rating, created_at)
-                    VALUES ($1, $2, $3, $4)
-                """,
-                    user_id,
-                    service_id,
-                    rating,
-                    datetime.utcnow(),
-                )
+            async with self._lock:  # Ensure thread safety
+                if self.is_updating:
+                    raise ValueError("Model update already in progress")
 
-            # Update cache
-            cache_key = f"recommendations:{user_id}"
-            await self.redis.delete(cache_key)
+                self.is_updating = True
+                logging.info("Starting manual model update...")
+
+                self.recommender.reset_caches()
+                await self.update_model()
+
+                return {
+                    "status": "success",
+                    "is_ready": self._model_ready,
+                }
 
         except Exception as e:
-            logging.error(f"Error recording interaction: {str(e)}")
+            logging.error(f"Model update failed: {str(e)}")
             raise
-
-    async def trigger_model_update(self):
-        if not self.is_updating:
-            self.is_updating = True
-            try:
-                await self.update_model()
-            finally:
-                self.is_updating = False
+        finally:
+            self.is_updating = False
 
     async def periodic_model_update(self):
         while True:
             try:
                 async with self._lock:
+                    self.recommender.reset_caches()
                     await self.update_model()
             except Exception as e:
                 logging.error(f"Error in periodic model update: {str(e)}")
