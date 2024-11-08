@@ -4,11 +4,11 @@ from benchmark.load_test import LoadTestConfig, EnhancedLoadTester
 
 async def main():
     config = LoadTestConfig(
-        initial_users=500,
-        max_users=2000,
-        step_size=500,
-        requests_per_user=200,
-        step_duration=120,
+        initial_users=100,
+        max_users=1000,
+        step_size=50,
+        requests_per_user=100,
+        step_duration=60,
     )
 
     tester = EnhancedLoadTester(config=config)

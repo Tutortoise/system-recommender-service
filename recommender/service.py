@@ -22,7 +22,15 @@ class RecommenderService:
 
     async def initialize(self):
         self.pg_pool = await asyncpg.create_pool(
-            settings.POSTGRES_URL, min_size=5, max_size=20
+            settings.POSTGRES_URL,
+            min_size=5,
+            max_size=20,
+            command_timeout=60,
+            init=lambda conn: conn.execute("""
+                SET work_mem = '32MB';
+                SET random_page_cost = 1.1;
+                SET effective_cache_size = '1GB';
+            """)
         )
 
         # Initial model training
@@ -96,86 +104,118 @@ class RecommenderService:
 
                 recommended_tutors = await conn.fetch(
                     """
-                    WITH user_interests AS (
-                        SELECT unnest(interest) as interest
+                    WITH RECURSIVE
+                    user_interests AS (
+                        SELECT DISTINCT LOWER(unnest(interest)) as interest
                         FROM users
                         WHERE id = $1
                     ),
-                    ranked_tutors AS (
-                        SELECT
+                    filtered_tutors AS (
+                        -- Pre-filter tutors and compute matches
+                        SELECT DISTINCT ON (t.id, ts.subject)  -- Get unique tutor-subject combinations
                             t.id::text,
                             t.email,
+                            ts.id as service_id,
                             ts.subject,
                             ts.specialization,
                             ts.teaching_style,
                             ts.hourly_rate::float,
                             t.latitude,
                             t.longitude,
-                            COALESCE(AVG(sr.session_rating)::float, 0.0) as average_rating,
-                            COUNT(sr.session_rating)::int as num_ratings,
-                            EXISTS (
-                                SELECT 1 FROM user_interests
-                                WHERE LOWER(interest) = LOWER(ts.subject)
-                            ) as exact_match,
-                            EXISTS (
-                                SELECT 1 FROM user_interests
-                                WHERE LOWER(ts.subject) LIKE LOWER('%' || interest || '%')
-                                OR LOWER(interest) LIKE LOWER('%' || ts.subject || '%')
-                            ) as partial_match,
-                            array_agg(DISTINCT sr.session_rating) as ratings
+                            COALESCE(AVG(sr.session_rating) OVER (PARTITION BY t.id, ts.subject), 0.0)::float as average_rating,
+                            COUNT(sr.session_rating) OVER (PARTITION BY t.id, ts.subject)::int as num_ratings,
+                            CASE
+                                WHEN EXISTS (
+                                    SELECT 1 FROM user_interests ui
+                                    WHERE LOWER(ts.subject) = ui.interest
+                                ) THEN 3  -- Exact match
+                                WHEN EXISTS (
+                                    SELECT 1 FROM user_interests ui
+                                    WHERE LOWER(ts.subject) LIKE '%' || ui.interest || '%'
+                                    OR ui.interest LIKE '%' || LOWER(ts.subject) || '%'
+                                ) THEN 2  -- Partial match
+                                ELSE 1    -- No direct match
+                            END as match_score
                         FROM tutor t
-                        JOIN tutor_service ts ON t.id = ts.tutor_id
+                        INNER JOIN tutor_service ts ON t.id = ts.tutor_id
                         LEFT JOIN session_rating sr ON ts.id = sr.service_id
                         WHERE t.id::text = ANY($2)
-                        GROUP BY
-                            t.id,
-                            t.email,
-                            ts.subject,
-                            ts.specialization,
-                            ts.teaching_style,
-                            ts.hourly_rate,
-                            t.latitude,
-                            t.longitude
+                    ),
+                    ranked_results AS (
+                        -- Apply ranking with window functions
+                        SELECT
+                            *,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY subject
+                                ORDER BY
+                                    match_score DESC,
+                                    average_rating DESC,
+                                    num_ratings DESC
+                            ) as subject_rank,
+                            CASE
+                                WHEN average_rating >= 4.5 AND num_ratings >= 10 THEN 1
+                                WHEN average_rating >= 4.0 AND num_ratings >= 5 THEN 2
+                                WHEN average_rating >= 3.5 THEN 3
+                                ELSE 4
+                            END as rating_tier
+                        FROM filtered_tutors
                     )
-                    SELECT *,
-                        CASE
-                            WHEN exact_match THEN 1
-                            WHEN partial_match THEN 2
-                            ELSE 3
-                        END as match_rank
-                    FROM ranked_tutors
+                    SELECT
+                        id,
+                        email,
+                        service_id,
+                        subject,
+                        specialization,
+                        teaching_style,
+                        hourly_rate,
+                        average_rating,
+                        num_ratings,
+                        match_score,
+                        subject_rank,
+                        rating_tier
+                    FROM ranked_results
                     ORDER BY
-                        match_rank ASC,                    -- Primary sort: exact subject matches first
-                        array_length(specialization, 1) DESC,  -- Secondary sort: more specializations
-                        CASE
-                            WHEN average_rating >= 4.0 AND num_ratings >= 3 THEN 1
-                            WHEN average_rating >= 3.5 THEN 2
-                            ELSE 3
-                        END,                               -- Tertiary sort: rating tier
-                        average_rating DESC,               -- Final sort: specific rating
-                        num_ratings DESC                   -- Then by number of ratings
+                        match_score DESC,               -- Best matches first
+                        rating_tier ASC,                -- Higher rated tutors
+                        average_rating DESC,            -- Specific rating
+                        num_ratings DESC,               -- Number of ratings
+                        subject_rank ASC                -- Best within subject
+                    FETCH FIRST $3 ROWS WITH TIES      -- Get top-k with ties
                     """,
                     user_id,
                     tutor_ids_str,
+                    top_k
                 )
 
-                # Process recommendations with stronger interest matching
-                matched_recommendations = []
-                partial_matched_recommendations = []
-                other_recommendations = []
-
-                # Track subjects to avoid duplicates while maintaining best rated tutors per subject
-                subject_seen = set()
+                # Process recommendations
+                recommendations = []
+                seen_combinations = set()  # Track unique tutor-subject combinations
 
                 for tutor in recommended_tutors:
-                    subject = tutor["subject"].lower()
+                    match_reasons = self._get_match_reasons(
+                        user["interest"],
+                        user["learning_style"],
+                        tutor["subject"],
+                        tutor["teaching_style"],
+                        tutor["average_rating"],
+                    )
 
-                    # Skip if we already have a tutor for this subject
-                    if subject in subject_seen:
+                    if not match_reasons:
                         continue
+
+                    # Add rating-based reason if applicable
+                    if tutor["average_rating"] >= 4.5 and tutor["num_ratings"] >= 10:
+                        match_reasons.append(
+                            f"Highly rated tutor ({tutor['average_rating']}/5 from {tutor['num_ratings']} reviews)"
+                        )
+                    elif tutor["average_rating"] >= 4.0 and tutor["num_ratings"] >= 5:
+                        match_reasons.append(
+                            f"Well-rated tutor ({tutor['average_rating']}/5)"
+                        )
 
                     recommendation = {
                         "id": str(tutor["id"]),
+                        "service_id": str(tutor["service_id"]),
                         "email": tutor["email"],
                         "subject": tutor["subject"],
                         "specialization": tutor["specialization"],
@@ -183,31 +223,22 @@ class RecommenderService:
                         "hourly_rate": float(tutor["hourly_rate"]),
                         "average_rating": float(tutor["average_rating"]),
                         "num_ratings": int(tutor["num_ratings"]),
-                        "match_reasons": self._get_match_reasons(
-                            user["interest"],
-                            user["learning_style"],
-                            tutor["subject"],
-                            tutor["teaching_style"],
-                            tutor["average_rating"],
-                        ),
+                        "match_reasons": match_reasons,
+                        "match_score": tutor["match_score"],
+                        "subject_rank": tutor["subject_rank"],
                     }
 
-                    if tutor["exact_match"]:
-                        matched_recommendations.append(recommendation)
-                        subject_seen.add(subject)
-                    elif tutor["partial_match"] and subject not in subject_seen:
-                        partial_matched_recommendations.append(recommendation)
-                        subject_seen.add(subject)
-                    elif subject not in subject_seen:
-                        other_recommendations.append(recommendation)
-                        subject_seen.add(subject)
+                    recommendations.append(recommendation)
 
-                # Combine recommendations prioritizing subject matches
-                final_recommendations = (
-                    matched_recommendations  # Exact subject matches first
-                    + partial_matched_recommendations  # Related subjects second
-                    + other_recommendations  # Other subjects last
-                )[:top_k]
+                # Sort final recommendations
+                recommendations.sort(
+                    key=lambda x: (
+                        -x["match_score"],  # Higher match score first
+                        -x["average_rating"],  # Higher rating next
+                        -x["num_ratings"],  # More ratings next
+                        x["subject_rank"],  # Better ranked within subject
+                    )
+                )
 
                 response = {
                     "user": {
@@ -217,7 +248,7 @@ class RecommenderService:
                         "learning_style": user["learning_style"],
                         "city": user["city"],
                     },
-                    "recommendations": final_recommendations,
+                    "recommendations": recommendations[:top_k],
                 }
 
                 return response
@@ -244,58 +275,30 @@ class RecommenderService:
         rating: float,
     ) -> List[str]:
         reasons = []
+        similarities = []
 
-        # Ensure user_interests is a list
-        if isinstance(user_interests, str):
-            try:
-                user_interests = json.loads(user_interests)
-            except:
-                user_interests = [user_interests]
-        elif user_interests is None:
-            user_interests = []
-
-        # Subject match with more detailed explanation
-        if any(
-            interest.lower() == tutor_subject.lower() for interest in user_interests
-        ):
-            reasons.append(
-                f"Perfect match: Teaches {tutor_subject} (exactly matches your interest)"
+        for interest in user_interests:
+            sim = self.feature_processor.subject_embedding.get_subject_similarity(
+                interest, tutor_subject
             )
-        elif any(
-            tutor_subject.lower() in interest.lower()
-            or interest.lower() in tutor_subject.lower()
-            for interest in user_interests
-        ):
-            matching_interests = [
-                interest
-                for interest in user_interests
-                if tutor_subject.lower() in interest.lower()
-                or interest.lower() in tutor_subject.lower()
-            ]
-            reasons.append(
-                f"Related to your interest in {', '.join(matching_interests)}"
-            )
+            similarities.append((interest, sim))
 
-        # Learning style match
-        if user_style and tutor_style:
-            if user_style == tutor_style:
+        similarities.sort(key=lambda x: x[1], reverse=True)
+
+        if similarities:
+            best_match, best_sim = similarities[0]
+            if best_sim > 0.85:
                 reasons.append(
-                    f"Teaching style ({tutor_style}) perfectly matches your learning preference"
+                    f"Perfect match: Teaches {tutor_subject} (exactly matches your interest in {best_match})"
                 )
-            elif tutor_style == "flexible":
-                reasons.append("Flexible teaching style that can adapt to your needs")
+            elif best_sim > 0.7:
+                reasons.append(
+                    f"Strong match: {tutor_subject} is closely related to your interest in {best_match}"
+                )
+            elif best_sim > 0.5:
+                reasons.append(f"Related to your interest in {best_match}")
             else:
-                reasons.append(
-                    f"Different teaching style ({tutor_style}) might provide new perspectives"
-                )
-
-        # Rating-based reason
-        if rating >= 4.5:
-            reasons.append(f"Highly rated tutor (★ {rating:.1f})")
-        elif rating >= 4.0:
-            reasons.append(f"Well-rated tutor (★ {rating:.1f})")
-        elif rating >= 3.5:
-            reasons.append(f"Above average rating (★ {rating:.1f})")
+                return []  # Don't include unrelated subjects
 
         return reasons
 
@@ -316,7 +319,6 @@ class RecommenderService:
                 """
                 )
 
-                # Fetch tutors with services and ratings with proper type casting
                 tutors = await conn.fetch(
                     """
                     SELECT

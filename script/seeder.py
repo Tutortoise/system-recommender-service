@@ -207,5 +207,5 @@ class DataSeeder:
 
 
 if __name__ == "__main__":
-    seeder = DataSeeder(num_users=1000, num_tutors=200)
+    seeder = DataSeeder(num_users=10000, num_tutors=2000)
     asyncio.run(seeder.run())

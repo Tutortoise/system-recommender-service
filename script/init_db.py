@@ -156,6 +156,13 @@ async def init_db():
             CREATE INDEX IF NOT EXISTS idx_session_rating_user ON session_rating(user_id);
             CREATE INDEX IF NOT EXISTS idx_session_rating_service ON session_rating(service_id);
             CREATE INDEX IF NOT EXISTS idx_session_rating ON session_rating(session_rating);
+
+            -- Indexes for recommendation_cache table
+            CREATE INDEX IF NOT EXISTS idx_tutor_service_tutor_id ON tutor_service(tutor_id);
+            CREATE INDEX IF NOT EXISTS idx_session_rating_service_id ON session_rating(service_id);
+            CREATE INDEX IF NOT EXISTS idx_tutor_service_subject ON tutor_service(subject);
+            CREATE INDEX IF NOT EXISTS idx_tutor_service_composite
+                ON tutor_service(tutor_id, subject, teaching_style);
             """
         )
 
