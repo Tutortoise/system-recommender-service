@@ -2,10 +2,13 @@ import asyncio
 import asyncpg
 from faker import Faker
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime
 import random
-import numpy as np
 from typing import List
+import sys
+from pathlib import Path
+
+sys.path.append(str(Path(__file__).parent.parent))
 
 from config import settings
 
@@ -99,8 +102,8 @@ class DataSeeder:
                 tutor_id,
                 fake.email(),
                 fake.phone_number()[:13],
-                float(fake.latitude()),     # Store latitude directly
-                float(fake.longitude()),    # Store longitude directly
+                float(fake.latitude()),  # Store latitude directly
+                float(fake.longitude()),  # Store longitude directly
                 random.randint(1, 20),
                 datetime.now(),
             )

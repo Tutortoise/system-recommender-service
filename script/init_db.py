@@ -1,5 +1,11 @@
 import asyncio
 import asyncpg
+import sys
+from pathlib import Path
+
+# Add parent directory to path to allow absolute imports
+sys.path.append(str(Path(__file__).parent.parent))
+
 from config import settings
 
 
@@ -51,7 +57,8 @@ async def init_db():
         )
 
         # Create TUTOR table (no dependencies)
-        await conn.execute("""
+        await conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS tutor (
                 id UUID PRIMARY KEY,
                 email VARCHAR NOT NULL,
@@ -64,7 +71,8 @@ async def init_db():
                 updated_at TIMESTAMP NOT NULL,
                 last_seen TIMESTAMP
             )
-        """)
+        """
+        )
 
         # Create TUTOR_SERVICE table (depends on tutor)
         await conn.execute(

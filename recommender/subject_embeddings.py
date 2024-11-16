@@ -1,9 +1,8 @@
-from gensim.models import KeyedVectors
 import numpy as np
-from typing import List, Dict
+from typing import List
 import logging
-import os
 import gensim.downloader as api
+
 
 class SubjectEmbedding:
     def __init__(self, vector_size=300):
@@ -13,7 +12,7 @@ class SubjectEmbedding:
 
         try:
             # Load Google's pre-trained Word2Vec model
-            self.model = api.load('word2vec-google-news-300')
+            self.model = api.load("word2vec-google-news-300")
             logging.info("Loaded pre-trained Word2Vec model")
         except Exception as e:
             logging.error(f"Error loading pre-trained model: {str(e)}")

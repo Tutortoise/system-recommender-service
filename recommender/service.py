@@ -1,12 +1,15 @@
 import asyncio
 from typing import List, Dict
 import asyncpg
-import json
 import logging
 from uuid import UUID
 from fastapi import HTTPException
 
-from .config import settings
+import sys
+from pathlib import Path
+
+sys.path.append(str(Path(__file__).parent.parent))
+from config import settings
 from .feature_processor import FeatureProcessor
 from .recommender import Recommender
 
@@ -26,11 +29,13 @@ class RecommenderService:
             min_size=5,
             max_size=20,
             command_timeout=60,
-            init=lambda conn: conn.execute("""
+            init=lambda conn: conn.execute(
+                """
                 SET work_mem = '32MB';
                 SET random_page_cost = 1.1;
                 SET effective_cache_size = '1GB';
-            """)
+            """
+            ),
         )
 
         # Initial model training
@@ -184,7 +189,7 @@ class RecommenderService:
                     """,
                     user_id,
                     tutor_ids_str,
-                    top_k
+                    top_k,
                 )
 
                 # Process recommendations

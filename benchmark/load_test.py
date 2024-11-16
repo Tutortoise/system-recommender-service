@@ -11,7 +11,11 @@ from tabulate import tabulate
 import matplotlib.pyplot as plt
 import seaborn as sns
 from dataclasses import dataclass
-from recommender.config import settings
+import sys
+from pathlib import Path
+
+sys.path.append(str(Path(__file__).parent.parent))
+from config import settings
 import os
 
 
