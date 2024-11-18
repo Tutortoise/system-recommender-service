@@ -1,44 +1,30 @@
 import asyncio
-import asyncpg
 from faker import Faker
 import uuid
 from datetime import datetime
 import random
 from typing import List
+from google.cloud import firestore
 import sys
 from pathlib import Path
 
 sys.path.append(str(Path(__file__).parent.parent))
 
-from config import settings
-
+from config import initialize_firestore
 fake = Faker()
 
-# Constants for data generation
 LEARNING_STYLES = ["structured", "flexible", "project-based"]
 SUBJECTS = [
-    "Mathematics",
-    "Physics",
-    "Chemistry",
-    "Biology",
-    "English",
-    "Japanese",
-    "Korean",
-    "Chinese",
-    "Programming",
-    "Web Development",
-    "Data Science",
-    "Business",
-    "Economics",
-    "Accounting",
-    "Music",
-    "Art",
-    "Photography",
+    "Mathematics", "Physics", "Chemistry", "Biology",
+    "English", "Japanese", "Korean", "Chinese",
+    "Programming", "Web Development", "Data Science",
+    "Business", "Economics", "Accounting",
+    "Music", "Art", "Photography",
 ]
 
-
-class DataSeeder:
+class FirestoreSeeder:
     def __init__(self, num_users=1000, num_tutors=200):
+        self.db = initialize_firestore()
         self.num_users = num_users
         self.num_tutors = num_tutors
         self.user_ids = []
@@ -50,165 +36,126 @@ class DataSeeder:
         return random.sample(SUBJECTS, num_interests)
 
     def generate_specializations(self, subject: str) -> List[str]:
-        # Generate subject-specific specializations
         specializations = {
             "Mathematics": ["Calculus", "Algebra", "Geometry", "Statistics"],
             "Programming": ["Python", "Java", "JavaScript", "C++"],
             "Japanese": ["JLPT N1", "JLPT N2", "Conversation", "Business Japanese"],
-            # Add more subject-specific specializations as needed
         }
         default_specs = ["Beginner", "Intermediate", "Advanced"]
-
         subject_specs = specializations.get(subject, default_specs)
         num_specs = random.randint(1, min(3, len(subject_specs)))
         return random.sample(subject_specs, num_specs)
 
-    async def seed_users(self, conn):
+    def seed_users(self):
         print("Seeding users...")
+        batch = self.db.batch()
+        users_ref = self.db.collection('users')
+
         for _ in range(self.num_users):
-            user_id = uuid.uuid4()
+            user_id = str(uuid.uuid4())
             self.user_ids.append(user_id)
 
-            await conn.execute(
-                """
-                INSERT INTO users (
-                    id, email, phone_num, city, interest, learning_style,
-                    created_at, updated_at, last_seen
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $7, $7)
-            """,
-                user_id,
-                fake.email(),
-                fake.phone_number()[:13],
-                fake.city(),
-                self.generate_interests(),
-                random.choice(LEARNING_STYLES),
-                datetime.now(),
-            )
+            user_data = {
+                'email': fake.email(),
+                'phone_num': fake.phone_number()[:13],
+                'city': fake.city(),
+                'interests': self.generate_interests(),
+                'learning_style': random.choice(LEARNING_STYLES),
+                'created_at': datetime.now(),
+                'updated_at': datetime.now(),
+                'last_seen': datetime.now()
+            }
 
-    async def seed_tutors(self, conn):
+            batch.set(users_ref.document(user_id), user_data)
+
+        batch.commit()
+
+    def seed_tutors(self):
         print("Seeding tutors...")
+        tutors_ref = self.db.collection('tutors')
+        services_ref = self.db.collection('tutor_services')
+
         for _ in range(self.num_tutors):
-            tutor_id = uuid.uuid4()
+            tutor_id = str(uuid.uuid4())
             self.tutor_ids.append(tutor_id)
 
             # Create tutor
-            await conn.execute(
-                """
-                INSERT INTO tutor (
-                    id, email, phone_num, latitude, longitude, coverage_range,
-                    created_at, updated_at, last_seen
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $7, $7)
-                """,
-                tutor_id,
-                fake.email(),
-                fake.phone_number()[:13],
-                float(fake.latitude()),  # Store latitude directly
-                float(fake.longitude()),  # Store longitude directly
-                random.randint(1, 20),
-                datetime.now(),
-            )
+            tutor_data = {
+                'email': fake.email(),
+                'phone_num': fake.phone_number()[:13],
+                'latitude': float(fake.latitude()),
+                'longitude': float(fake.longitude()),
+                'coverage_range': random.randint(1, 20),
+                'created_at': datetime.now(),
+                'updated_at': datetime.now(),
+                'last_seen': datetime.now()
+            }
+
+            tutors_ref.document(tutor_id).set(tutor_data)
 
             # Create 1-3 services per tutor
             num_services = random.randint(1, 3)
             for _ in range(num_services):
-                service_id = uuid.uuid4()
+                service_id = str(uuid.uuid4())
                 self.service_ids.append(service_id)
                 subject = random.choice(SUBJECTS)
 
-                await conn.execute(
-                    """
-                    INSERT INTO tutor_service (
-                        id, tutor_id, year_of_experience, teaching_style,
-                        hourly_rate, subject, specialization, description,
-                        created_at, updated_at
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9)
-                """,
-                    service_id,
-                    tutor_id,
-                    random.randint(1, 15),
-                    random.choice(LEARNING_STYLES),
-                    random.randint(20, 100),  # hourly rate
-                    subject,
-                    self.generate_specializations(subject),
-                    fake.paragraph(),
-                    datetime.now(),
-                )
+                service_data = {
+                    'tutor_id': tutor_id,
+                    'year_of_experience': random.randint(1, 15),
+                    'teaching_style': random.choice(LEARNING_STYLES),
+                    'hourly_rate': random.randint(20, 100),
+                    'subject': subject,
+                    'specialization': self.generate_specializations(subject),
+                    'description': fake.paragraph(),
+                    'created_at': datetime.now(),
+                    'updated_at': datetime.now()
+                }
 
-    async def seed_orders_and_ratings(self, conn):
-        print("Seeding orders and ratings...")
+                services_ref.document(service_id).set(service_data)
+
+    def seed_ratings(self):
+        print("Seeding ratings...")
+        ratings_ref = self.db.collection('session_ratings')
+
         for user_id in self.user_ids:
-            # Generate 0-5 orders per user
-            num_orders = random.randint(0, 5)
-            for _ in range(num_orders):
+            num_ratings = random.randint(0, 5)
+            for _ in range(num_ratings):
                 service_id = random.choice(self.service_ids)
-                tutor_id = await conn.fetchval(
-                    "SELECT tutor_id FROM tutor_service WHERE id = $1", service_id
-                )
 
-                # Create order
-                session_time = fake.date_time_between(start_date="-3m", end_date="+1m")
-                status = random.choice(["completed", "scheduled", "pending"])
+                rating_data = {
+                    'user_id': user_id,
+                    'service_id': service_id,
+                    'message': fake.paragraph(),
+                    'rating': random.randint(1, 5),
+                    'created_at': datetime.now(),
+                    'updated_at': datetime.now()
+                }
 
-                await conn.execute(
-                    """
-                    INSERT INTO "order" (
-                        user_id, tutor_id, service_id, session_time,
-                        total_hour, status, created_at, updated_at
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $7)
-                """,
-                    user_id,
-                    tutor_id,
-                    service_id,
-                    session_time,
-                    random.randint(1, 4),
-                    status,
-                    datetime.now(),
-                )
+                ratings_ref.document(str(uuid.uuid4())).set(rating_data)
 
-                # Add rating for completed orders
-                if status == "completed":
-                    await conn.execute(
-                        """
-                        INSERT INTO session_rating (
-                            session_id, user_id, service_id, message,
-                            session_rating, created_at, updated_at
-                        ) VALUES ($1, $2, $3, $4, $5, $6, $6)
-                    """,
-                        uuid.uuid4(),  # session_id
-                        user_id,
-                        service_id,
-                        fake.paragraph(),
-                        random.randint(1, 5),
-                        datetime.now(),
-                    )
-
-    async def run(self):
-        conn = await asyncpg.connect(settings.POSTGRES_URL)
-
+    def run(self):
         try:
-            # Seed data
-            await self.seed_users(conn)
-            await self.seed_tutors(conn)
-            await self.seed_orders_and_ratings(conn)
+            self.seed_users()
+            self.seed_tutors()
+            self.seed_ratings()
 
-            # Print statistics (update this query to use 'users')
-            users = await conn.fetchval("SELECT COUNT(*) FROM users")
-            tutors = await conn.fetchval("SELECT COUNT(*) FROM tutor")
-            services = await conn.fetchval("SELECT COUNT(*) FROM tutor_service")
-            orders = await conn.fetchval('SELECT COUNT(*) FROM "order"')
-            ratings = await conn.fetchval("SELECT COUNT(*) FROM session_rating")
+            # Print statistics
+            users = len(list(self.db.collection('users').stream()))
+            tutors = len(list(self.db.collection('tutors').stream()))
+            services = len(list(self.db.collection('tutor_services').stream()))
+            ratings = len(list(self.db.collection('session_ratings').stream()))
 
             print(f"\nSeeding completed:")
             print(f"Users: {users}")
             print(f"Tutors: {tutors}")
             print(f"Services: {services}")
-            print(f"Orders: {orders}")
             print(f"Ratings: {ratings}")
 
-        finally:
-            await conn.close()
-
+        except Exception as e:
+            print(f"Error seeding data: {str(e)}")
+            raise
 
 if __name__ == "__main__":
-    seeder = DataSeeder(num_users=10000, num_tutors=2000)
-    asyncio.run(seeder.run())
+    seeder = FirestoreSeeder(num_users=2000, num_tutors=100)
+    seeder.run()

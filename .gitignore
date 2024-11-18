@@ -90,3 +90,4 @@ cython_debug/
 redis_data/*
 postgres_data/*
 .idea
+firestore.indexes.json
