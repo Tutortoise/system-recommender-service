@@ -1,13 +1,20 @@
 services:
-  firestore-emulator:
-    image: google/cloud-sdk:emulators
-    platform: linux/amd64 # Specify platform explicitly
-    ports:
-      - "8081:8081"
+  user-interaction-db:
+    image: postgres:14-alpine
     environment:
-      - FIRESTORE_PROJECT_ID=demo-project
-      - FIRESTORE_EMULATOR_HOST=0.0.0.0:8081
-    command: >
-      gcloud beta emulators firestore start
-      --host-port=0.0.0.0:8081
-      --project=demo-project
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    ports:
+      - 5432:5432
+    volumes:
+      - ./postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:
+  redis_data:

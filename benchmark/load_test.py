@@ -6,6 +6,7 @@ import pandas as pd
 from typing import List, Dict, Optional
 from datetime import datetime, timedelta
 import random
+import asyncpg
 from tabulate import tabulate
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -14,7 +15,7 @@ import sys
 from pathlib import Path
 
 sys.path.append(str(Path(__file__).parent.parent))
-from config import initialize_firestore
+from config import settings
 import os
 
 
@@ -29,8 +30,6 @@ class LoadTestConfig:
     request_timeout: int = 5
     think_time_min: float = 0.1
     think_time_max: float = 1.0
-    concurrent_users: int = 10
-    test_duration: int = 60
 
 
 class EnhancedLoadTester:
@@ -46,18 +45,20 @@ class EnhancedLoadTester:
         self.error_details: Dict[int, List[str]] = {}
         self.step_results: List[Dict] = []
         self.start_time = None
-        self.db = initialize_firestore()
 
     async def setup(self):
+        # Get user IDs from database using the correct table name
+        conn = await asyncpg.connect(settings.POSTGRES_URL)
         try:
-            # Get user IDs from Firestore
-            users_ref = self.db.collection('users').stream()
-            self.user_ids = [user.id for user in users_ref]
-
-            if not self.user_ids:
+            # Changed from user_features to users table
+            rows = await conn.fetch("SELECT id FROM users")
+            if not rows:
                 raise Exception(
                     "No users found in database. Please seed the database first."
                 )
+            self.user_ids = [
+                str(row["id"]) for row in rows
+            ]  # Changed from user_id to id
 
             # Verify service health
             async with aiohttp.ClientSession() as session:
@@ -71,6 +72,8 @@ class EnhancedLoadTester:
         except Exception as e:
             print(f"Error during setup: {str(e)}")
             raise
+        finally:
+            await conn.close()
 
     async def _run_user_session(self, session: aiohttp.ClientSession, user_id: str):
         for _ in range(self.config.requests_per_user):

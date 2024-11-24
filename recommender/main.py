@@ -8,7 +8,6 @@ from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
-from google.cloud import firestore
 from contextlib import asynccontextmanager
 
 from recommender.service import RecommenderService
@@ -21,6 +20,9 @@ async def lifespan(app: FastAPI):
     recommender_service = RecommenderService()
     await recommender_service.initialize()
     yield
+    # Shutdown
+    if recommender_service.pg_pool:
+        await recommender_service.pg_pool.close()
 
 
 app = FastAPI(title="Mentor Recommendation API", lifespan=lifespan)
@@ -125,9 +127,9 @@ async def get_model_status():
 @app.get("/health")
 async def health_check():
     try:
-        # Test Firestore connection
-        test_ref = recommender_service.db.collection('test').document('health')
-        test_ref.set({'timestamp': firestore.SERVER_TIMESTAMP})
+        # Properly acquire and use connection
+        async with recommender_service.pg_pool.acquire() as conn:
+            await conn.fetchval("SELECT 1")
 
         return JSONResponse(
             status_code=200,
@@ -136,7 +138,9 @@ async def health_check():
                 "code": "HEALTHY",
                 "data": {
                     "database": "connected",
-                    "model_status": "ready" if recommender_service._model_ready else "not_ready",
+                    "model_status": (
+                        "ready" if recommender_service._model_ready else "not_ready"
+                    ),
                     "is_updating": recommender_service.is_updating,
                 },
             },

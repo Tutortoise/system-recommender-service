@@ -11,9 +11,9 @@ class SubjectEmbedding:
         self.subject_vectors = {}
 
         try:
-            logging.info("Loading Word2Vec model... This might take a few minutes the first time.")
+            # Load Google's pre-trained Word2Vec model
             self.model = api.load("word2vec-google-news-300")
-            logging.info("Word2Vec model loaded successfully!")
+            logging.info("Loaded pre-trained Word2Vec model")
         except Exception as e:
             logging.error(f"Error loading pre-trained model: {str(e)}")
             raise
