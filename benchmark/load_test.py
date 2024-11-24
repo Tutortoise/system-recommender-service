@@ -47,10 +47,8 @@ class EnhancedLoadTester:
         self.start_time = None
 
     async def setup(self):
-        # Get user IDs from database using the correct table name
         conn = await asyncpg.connect(settings.POSTGRES_URL)
         try:
-            # Changed from user_features to users table
             rows = await conn.fetch("SELECT id FROM users")
             if not rows:
                 raise Exception(
@@ -58,7 +56,7 @@ class EnhancedLoadTester:
                 )
             self.user_ids = [
                 str(row["id"]) for row in rows
-            ]  # Changed from user_id to id
+            ]
 
             # Verify service health
             async with aiohttp.ClientSession() as session:
