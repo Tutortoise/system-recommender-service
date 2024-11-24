@@ -49,14 +49,12 @@ class EnhancedLoadTester:
     async def setup(self):
         conn = await asyncpg.connect(settings.POSTGRES_URL)
         try:
-            rows = await conn.fetch("SELECT id FROM users")
+            rows = await conn.fetch("SELECT id FROM learners")
             if not rows:
                 raise Exception(
-                    "No users found in database. Please seed the database first."
+                    "No learners found in database. Please seed the database first."
                 )
-            self.user_ids = [
-                str(row["id"]) for row in rows
-            ]
+            self.user_ids = [str(row["id"]) for row in rows]
 
             # Verify service health
             async with aiohttp.ClientSession() as session:
@@ -65,7 +63,7 @@ class EnhancedLoadTester:
                         health_data = await response.json()
                         raise Exception(f"Service unhealthy: {health_data}")
 
-            print(f"Successfully loaded {len(self.user_ids)} user IDs for testing")
+            print(f"Successfully loaded {len(self.user_ids)} learner IDs for testing")
 
         except Exception as e:
             print(f"Error during setup: {str(e)}")
