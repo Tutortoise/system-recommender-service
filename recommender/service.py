@@ -74,7 +74,8 @@ class RecommenderService:
         try:
             async with self.pg_pool.acquire() as conn:
                 # Get learner data
-                learner = await conn.fetchrow("""
+                learner = await conn.fetchrow(
+                    """
                     SELECT
                         id,
                         email,
@@ -85,7 +86,9 @@ class RecommenderService:
                         district
                     FROM learners
                     WHERE id = $1
-                """, user_id)
+                """,
+                    user_id,
+                )
 
                 if not learner:
                     raise HTTPException(
@@ -98,18 +101,21 @@ class RecommenderService:
                     )
 
                 # Process learner features
-                user_vector = self.feature_processor.process_user_features({
-                    "learning_style": learner["learning_style"],
-                    "city": learner["city"],
-                    "district": learner["district"]
-                })
+                user_vector = self.feature_processor.process_user_features(
+                    {
+                        "learning_style": learner["learning_style"],
+                        "city": learner["city"],
+                        "district": learner["district"],
+                    }
+                )
 
                 self.recommender.update_single_user(user_id, user_vector)
                 tutor_ids = self.recommender.get_recommendations(user_id, top_k)
                 tutor_ids_str = [str(tid) for tid in tutor_ids]
 
                 # Get recommended tutors with their tutories
-                recommended_tutors = await conn.fetch("""
+                recommended_tutors = await conn.fetch(
+                    """
                     WITH tutor_stats AS (
                         SELECT
                             t.id as tutor_id,
@@ -118,7 +124,7 @@ class RecommenderService:
                             t.gender,
                             t.city,
                             t.district,
-                            ty.id as tutory_id,
+                            ty.id as tutories_id,
                             s.name as subject_name,
                             ty.about_you,
                             ty.teaching_methodology,
@@ -130,7 +136,7 @@ class RecommenderService:
                         FROM tutors t
                         INNER JOIN tutories ty ON t.id = ty.tutor_id
                         INNER JOIN subjects s ON ty.subject_id = s.id
-                        LEFT JOIN orders o ON ty.id = o.tutory_id
+                        LEFT JOIN orders o ON ty.id = o.tutories_id
                         WHERE t.id::text = ANY($1)
                         GROUP BY
                             t.id, t.name, t.email, t.gender, t.city, t.district,
@@ -144,7 +150,7 @@ class RecommenderService:
                         gender,
                         city,
                         district,
-                        tutory_id,
+                        tutories_id,
                         subject_name,
                         about_you,
                         teaching_methodology,
@@ -155,30 +161,26 @@ class RecommenderService:
                         completed_orders
                     FROM tutor_stats
                     ORDER BY completed_orders DESC, total_orders DESC
-                """, tutor_ids_str)
+                """,
+                    tutor_ids_str,
+                )
 
                 recommendations = []
                 for tutor in recommended_tutors:
                     location_match = self._calculate_location_match(
-                        {
-                            "city": learner["city"],
-                            "district": learner["district"]
-                        },
-                        {
-                            "city": tutor["city"],
-                            "district": tutor["district"]
-                        }
+                        {"city": learner["city"], "district": learner["district"]},
+                        {"city": tutor["city"], "district": tutor["district"]},
                     )
 
                     match_reasons = self.feature_processor._get_match_reasons(
                         learner,
                         tutor,
-                        tutor  # tutory data is part of tutor data in our query
+                        tutor,  # tutory data is part of tutor data in our query
                     )
 
                     recommendation = {
                         "tutor_id": str(tutor["tutor_id"]),
-                        "tutory_id": str(tutor["tutory_id"]),
+                        "tutories_id": str(tutor["tutories_id"]),
                         "name": tutor["name"],
                         "email": tutor["email"],
                         "city": tutor["city"],
@@ -192,7 +194,7 @@ class RecommenderService:
                         "total_orders": int(tutor["total_orders"]),
                         "availability": tutor["availability"],
                         "match_reasons": match_reasons,
-                        "location_match": location_match
+                        "location_match": location_match,
                     }
 
                     recommendations.append(recommendation)
@@ -270,14 +272,12 @@ class RecommenderService:
             self.recommender.reset_caches()
 
             async with self.pg_pool.acquire() as conn:
-                # Fetch all text data first for fitting
+                # First, collect all texts for fitting
                 subjects = await conn.fetch("SELECT name FROM subjects")
-                tutories = await conn.fetch(
-                    """
+                tutories = await conn.fetch("""
                     SELECT teaching_methodology, about_you
                     FROM tutories
-                """
-                )
+                """)
 
                 # Prepare texts for fitting
                 all_texts = []
@@ -296,47 +296,66 @@ class RecommenderService:
                 # Fit the feature processor
                 self.feature_processor.fit(all_texts)
 
-                # Now fetch and process learner and tutor data
+                # Now fetch and process learner data with their interests
                 learners = await conn.fetch("""
+                    WITH learner_interests AS (
+                        SELECT
+                            i.learner_id,
+                            array_agg(s.name) as interests
+                        FROM interests i
+                        JOIN subjects s ON i.subject_id = s.id
+                        GROUP BY i.learner_id
+                    )
                     SELECT
-                        id::text as learner_id,
-                        learning_style,
-                        city,
-                        district
-                    FROM learners
+                        l.id::text as learner_id,
+                        l.learning_style,
+                        l.city,
+                        l.district,
+                        li.interests
+                    FROM learners l
+                    LEFT JOIN learner_interests li ON l.id = li.learner_id
                 """)
 
+                # Fetch tutor data with statistics
                 tutors = await conn.fetch("""
+                    WITH tutor_stats AS (
+                        SELECT
+                            t.id as tutor_id,
+                            ty.id as tutories_id,
+                            s.name as subject_name,
+                            ty.teaching_methodology,
+                            ty.hourly_rate,
+                            ty.type_lesson,
+                            t.city,
+                            t.district,
+                            COUNT(o.id) as total_orders,
+                            COUNT(o.id) FILTER (WHERE o.status = 'completed') as completed_orders,
+                            AVG(r.rating) as avg_rating,
+                            COUNT(r.id) as review_count
+                        FROM tutors t
+                        JOIN tutories ty ON t.id = ty.tutor_id
+                        JOIN subjects s ON ty.subject_id = s.id
+                        LEFT JOIN orders o ON ty.id = o.tutories_id
+                        LEFT JOIN reviews r ON o.id = r.order_id
+                        GROUP BY t.id, ty.id, s.name
+                    )
                     SELECT
-                        t.id::text as tutor_id,
-                        t.city,
-                        t.district,
-                        ty.teaching_methodology,
-                        s.name as subject_name,
-                        ty.hourly_rate,
-                        ty.type_lesson,
-                        COUNT(o.id) FILTER (WHERE o.status = 'completed') as completed_orders
-                    FROM tutors t
-                    JOIN tutories ty ON t.id = ty.tutor_id
-                    JOIN subjects s ON ty.subject_id = s.id
-                    LEFT JOIN orders o ON ty.id = o.tutory_id
-                    GROUP BY
-                        t.id, t.city, t.district,
-                        ty.teaching_methodology, s.name,
-                        ty.hourly_rate, ty.type_lesson
+                        *,
+                        COALESCE(completed_orders::float / NULLIF(total_orders, 0), 0) as completion_rate
+                    FROM tutor_stats
                 """)
 
                 # Process features
                 learner_features = {}
-                tutor_features = {}
-
                 for learner in learners:
                     learner_features[learner["learner_id"]] = self.feature_processor.process_user_features({
                         "learning_style": learner["learning_style"],
                         "city": learner["city"],
-                        "district": learner["district"]
+                        "district": learner["district"],
+                        "interests": learner["interests"]
                     })
 
+                tutor_features = {}
                 for tutor in tutors:
                     tutor_features[tutor["tutor_id"]] = self.feature_processor.process_tutor_features(
                         {
@@ -344,10 +363,15 @@ class RecommenderService:
                             "district": tutor["district"]
                         },
                         {
-                            "teaching_methodology": tutor["teaching_methodology"],
                             "subject": tutor["subject_name"],
+                            "teaching_methodology": tutor["teaching_methodology"],
                             "hourly_rate": float(tutor["hourly_rate"]),
                             "type_lesson": tutor["type_lesson"]
+                        },
+                        {
+                            "avg_rating": float(tutor["avg_rating"] or 0),
+                            "completion_rate": float(tutor["completion_rate"]),
+                            "review_count": int(tutor["review_count"])
                         }
                     )
 
@@ -358,7 +382,7 @@ class RecommenderService:
                 self._model_ready = True
 
         except Exception as e:
-            logging.error(f"Error updating model: {str(e)}")
+            logging.error(f"Error updating model: {str(e)}", exc_info=True)
             self._model_ready = False
             raise
         finally:
@@ -393,8 +417,8 @@ class RecommenderService:
         if learner["city"] == tutor["city"]:
             if learner["district"] == tutor["district"]:
                 return 1.0  # Perfect match - same district
-            return 0.7     # Same city, different district
-        return 0.0        # Different cities
+            return 0.7  # Same city, different district
+        return 0.0  # Different cities
 
     async def periodic_model_update(self):
         while True:

@@ -17,11 +17,15 @@ class FeatureProcessor:
         if not texts:
             raise ValueError("No texts provided for fitting")
 
-        # Just set dimensions and mark as fitted
         self.is_fitted = True
         self.feature_dim = (
-            self.vector_size + 3 + 1
-        )  # word2vec + learning_style + city + price
+            self.vector_size  # subject/methodology embeddings
+            + 3  # learning style
+            + 2  # location (city, district)
+            + 1  # price normalization
+            + 3  # lesson type
+            + 2  # ratings (avg_rating, completion_rate)
+        )
 
     def _get_text_vector(self, text: str) -> np.ndarray:
         """Get averaged word vectors for text"""
@@ -46,20 +50,30 @@ class FeatureProcessor:
             raise ValueError("Feature processor not fitted")
 
         try:
+            # Process interests
+            interest_vector = np.zeros(self.vector_size)
+            if user_data.get("interests"):
+                vectors = []
+                for interest in user_data["interests"]:
+                    vectors.append(self._get_text_vector(interest))
+                if vectors:
+                    interest_vector = np.mean(vectors, axis=0)
+
             # Process learning style
             learning_style_vec = self._encode_learning_style(
                 user_data.get("learning_style", "")
             )
 
-            # Process location (city/district)
+            # Process location
             location_vec = self._encode_location(
                 user_data.get("city", ""), user_data.get("district", "")
             )
 
             return np.concatenate(
                 [
-                    learning_style_vec * 0.5,  # learning style importance
-                    location_vec * 0.3,  # location importance
+                    interest_vector * 2.0,  # Highest weight for interests
+                    learning_style_vec * 0.5,  # Learning style importance
+                    location_vec * 0.3,  # Location importance
                 ]
             )
 
@@ -67,15 +81,17 @@ class FeatureProcessor:
             logging.error(f"Feature processing error: {str(e)}", exc_info=True)
             raise
 
-    def process_tutor_features(self, tutor_data: Dict, tutory_data: Dict, rating_data: Dict = None) -> np.ndarray:
+    def process_tutor_features(
+        self, tutor_data: Dict, tutory_data: Dict, rating_data: Dict = None
+    ) -> np.ndarray:
         if not self.is_fitted:
             raise ValueError("Feature processor not fitted")
 
         try:
-            # Process subject
+            # Process subject vector
             subject_vector = self._get_text_vector(tutory_data.get("subject", ""))
 
-            # Process teaching methodology
+            # Process methodology vector
             methodology_vector = self._get_text_vector(
                 tutory_data.get("teaching_methodology", "")
             )
@@ -85,25 +101,29 @@ class FeatureProcessor:
                 tutor_data.get("city", ""), tutor_data.get("district", "")
             )
 
-            # Process lesson type and hourly rate
-            type_lesson_vec = self._encode_lesson_type(
+            # Process lesson type
+            lesson_type_vec = self._encode_lesson_type(
                 tutory_data.get("type_lesson", "")
             )
+
+            # Process price normalization (50k-200k range)
             price_vec = self._encode_price(tutory_data.get("hourly_rate", 0))
 
-            # Process rating if available
-            rating_vec = self._encode_rating(rating_data) if rating_data else 0.0
+            # Process rating stats with default values if rating_data is None
+            rating_data = rating_data or {}
+            stats_vec = np.array([
+                rating_data.get("avg_rating", 0) / 5.0,  # Normalize rating to 0-1
+                rating_data.get("completion_rate", 0),  # Already 0-1
+            ])
 
-            return np.concatenate(
-                [
-                    subject_vector * 2.0,      # Highest weight for subject matching
-                    methodology_vector * 1.0,   # Teaching methodology importance
-                    location_vec * 0.3,        # Location importance
-                    type_lesson_vec * 0.5,     # Lesson type importance
-                    [price_vec * 0.2],         # Price importance
-                    [rating_vec * 0.4],        # Rating importance
-                ]
-            )
+            return np.concatenate([
+                subject_vector * 2.0,       # Highest weight for subject matching
+                methodology_vector * 0.8,   # Teaching methodology importance
+                location_vec * 0.5,         # Location importance
+                lesson_type_vec * 0.3,      # Lesson type importance
+                [price_vec * 0.4],         # Price importance
+                stats_vec * 0.6            # Stats importance
+            ])
 
         except Exception as e:
             logging.error(f"Feature processing error: {str(e)}", exc_info=True)
