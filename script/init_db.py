@@ -10,19 +10,26 @@ async def init_db():
     conn = await asyncpg.connect(settings.POSTGRES_URL)
 
     try:
-        # Drop existing tables and types if they exist
+        # Drop existing tables and types
         await conn.execute("""
             DROP TABLE IF EXISTS recommendation_cache CASCADE;
-            DROP TABLE IF EXISTS session_rating CASCADE;
+            DROP TABLE IF EXISTS reviews CASCADE;
+            DROP TABLE IF EXISTS chat_messages CASCADE;
+            DROP TABLE IF EXISTS chat_rooms CASCADE;
+            DROP TABLE IF EXISTS fcm_tokens CASCADE;
             DROP TABLE IF EXISTS orders CASCADE;
+            DROP TABLE IF EXISTS interests CASCADE;
             DROP TABLE IF EXISTS tutories CASCADE;
             DROP TABLE IF EXISTS tutors CASCADE;
             DROP TABLE IF EXISTS learners CASCADE;
             DROP TABLE IF EXISTS subjects CASCADE;
+
+            DROP TYPE IF EXISTS message_type_enum CASCADE;
+            DROP TYPE IF EXISTS user_role_enum CASCADE;
             DROP TYPE IF EXISTS learning_style_enum CASCADE;
             DROP TYPE IF EXISTS gender_enum CASCADE;
             DROP TYPE IF EXISTS type_lesson_enum CASCADE;
-            DROP TYPE IF EXISTS order_status_enum CASCADE;
+            DROP TYPE IF EXISTS status_enum CASCADE;
         """)
 
         # Create enum types
@@ -31,24 +38,25 @@ async def init_db():
                 CREATE TYPE gender_enum AS ENUM ('male', 'female', 'prefer not to say');
                 CREATE TYPE learning_style_enum AS ENUM ('visual', 'auditory', 'kinesthetic');
                 CREATE TYPE type_lesson_enum AS ENUM ('online', 'offline', 'both');
-                CREATE TYPE order_status_enum AS ENUM ('pending', 'declined', 'scheduled', 'completed');
+                CREATE TYPE status_enum AS ENUM ('pending', 'declined', 'scheduled', 'completed');
+                CREATE TYPE message_type_enum AS ENUM ('text', 'image');
+                CREATE TYPE user_role_enum AS ENUM ('learner', 'tutor');
             EXCEPTION
                 WHEN duplicate_object THEN null;
             END $$;
         """)
 
-        # Create SUBJECTS table
+        # Create tables
         await conn.execute("""
+            -- Subjects table
             CREATE TABLE IF NOT EXISTS subjects (
                 id UUID PRIMARY KEY,
                 name VARCHAR(255) NOT NULL,
                 icon_url VARCHAR(255),
                 created_at TIMESTAMP NOT NULL DEFAULT NOW()
-            )
-        """)
+            );
 
-        # Create LEARNERS table
-        await conn.execute("""
+            -- Learners table
             CREATE TABLE IF NOT EXISTS learners (
                 id UUID PRIMARY KEY,
                 name VARCHAR(255) NOT NULL,
@@ -61,11 +69,16 @@ async def init_db():
                 district VARCHAR(255),
                 created_at TIMESTAMP NOT NULL DEFAULT NOW(),
                 updated_at TIMESTAMP
-            )
-        """)
+            );
 
-        # Create TUTORS table
-        await conn.execute("""
+            -- Interests table (many-to-many between learners and subjects)
+            CREATE TABLE IF NOT EXISTS interests (
+                learner_id UUID REFERENCES learners(id) ON DELETE CASCADE,
+                subject_id UUID REFERENCES subjects(id) ON DELETE CASCADE,
+                PRIMARY KEY (learner_id, subject_id)
+            );
+
+            -- Tutors table
             CREATE TABLE IF NOT EXISTS tutors (
                 id UUID PRIMARY KEY,
                 name VARCHAR(255) NOT NULL,
@@ -77,11 +90,9 @@ async def init_db():
                 district VARCHAR(255),
                 created_at TIMESTAMP NOT NULL DEFAULT NOW(),
                 updated_at TIMESTAMP
-            )
-        """)
+            );
 
-        # Create TUTORIES table
-        await conn.execute("""
+            -- Tutories table
             CREATE TABLE IF NOT EXISTS tutories (
                 id UUID PRIMARY KEY,
                 tutor_id UUID REFERENCES tutors(id) ON DELETE CASCADE,
@@ -93,58 +104,87 @@ async def init_db():
                 availability JSONB,
                 created_at TIMESTAMP NOT NULL DEFAULT NOW(),
                 updated_at TIMESTAMP
-            )
-        """)
+            );
 
-        # Create ORDERS table
-        await conn.execute("""
+            -- Orders table
             CREATE TABLE IF NOT EXISTS orders (
                 id UUID PRIMARY KEY,
                 learner_id UUID REFERENCES learners(id) ON DELETE CASCADE,
-                tutor_id UUID REFERENCES tutors(id) ON DELETE CASCADE,
-                tutory_id UUID REFERENCES tutories(id) ON DELETE CASCADE,
+                tutories_id UUID REFERENCES tutories(id) ON DELETE CASCADE,
                 session_time TIMESTAMP NOT NULL,
+                estimated_end_time TIMESTAMP,
                 total_hours INTEGER NOT NULL,
                 notes TEXT,
-                status order_status_enum,
+                status status_enum,
                 created_at TIMESTAMP NOT NULL DEFAULT NOW()
-            )
-        """)
+            );
 
-        # Create recommendation cache table
-        await conn.execute("""
+            -- Chat rooms table
+            CREATE TABLE IF NOT EXISTS chat_rooms (
+                id UUID PRIMARY KEY,
+                learner_id UUID REFERENCES learners(id),
+                tutor_id UUID REFERENCES tutors(id),
+                last_message_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                created_at TIMESTAMP NOT NULL DEFAULT NOW()
+            );
+
+            -- Chat messages table
+            CREATE TABLE IF NOT EXISTS chat_messages (
+                id UUID PRIMARY KEY,
+                room_id UUID REFERENCES chat_rooms(id),
+                sender_id UUID NOT NULL,
+                sender_role user_role_enum NOT NULL,
+                content TEXT NOT NULL,
+                type message_type_enum NOT NULL,
+                sent_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                is_read BOOLEAN NOT NULL DEFAULT FALSE
+            );
+
+            -- FCM tokens table
+            CREATE TABLE IF NOT EXISTS fcm_tokens (
+                id UUID PRIMARY KEY,
+                user_id UUID NOT NULL,
+                token VARCHAR(255) NOT NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMP,
+                UNIQUE(user_id, token)
+            );
+
+            -- Reviews table
+            CREATE TABLE IF NOT EXISTS reviews (
+                id UUID PRIMARY KEY,
+                order_id UUID UNIQUE REFERENCES orders(id) ON DELETE CASCADE,
+                rating INTEGER NOT NULL,
+                message TEXT,
+                created_at TIMESTAMP NOT NULL DEFAULT NOW()
+            );
+
+            -- Recommendation cache table
             CREATE TABLE IF NOT EXISTS recommendation_cache (
                 learner_id UUID PRIMARY KEY REFERENCES learners(id),
                 recommendations JSONB,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
+            );
         """)
 
         # Create indexes
         await conn.execute("""
-            -- Indexes for SUBJECTS table
+            -- Indexes for efficient querying
             CREATE INDEX IF NOT EXISTS idx_subjects_name ON subjects(name);
-
-            -- Indexes for LEARNERS table
-            CREATE INDEX IF NOT EXISTS idx_learners_learning_style ON learners(learning_style);
-            CREATE INDEX IF NOT EXISTS idx_learners_city ON learners(city);
-            CREATE INDEX IF NOT EXISTS idx_learners_district ON learners(district);
-
-            -- Indexes for TUTORS table
-            CREATE INDEX IF NOT EXISTS idx_tutors_city ON tutors(city);
-            CREATE INDEX IF NOT EXISTS idx_tutors_district ON tutors(district);
-
-            -- Indexes for TUTORIES table
-            CREATE INDEX IF NOT EXISTS idx_tutories_tutor ON tutories(tutor_id);
-            CREATE INDEX IF NOT EXISTS idx_tutories_subject ON tutories(subject_id);
+            CREATE INDEX IF NOT EXISTS idx_learners_city_district ON learners(city, district);
+            CREATE INDEX IF NOT EXISTS idx_tutors_city_district ON tutors(city, district);
+            CREATE INDEX IF NOT EXISTS idx_tutories_tutor_subject ON tutories(tutor_id, subject_id);
             CREATE INDEX IF NOT EXISTS idx_tutories_hourly_rate ON tutories(hourly_rate);
-
-            -- Indexes for ORDERS table
+            CREATE INDEX IF NOT EXISTS idx_tutories_type_lesson ON tutories(type_lesson);
             CREATE INDEX IF NOT EXISTS idx_orders_learner ON orders(learner_id);
-            CREATE INDEX IF NOT EXISTS idx_orders_tutor ON orders(tutor_id);
-            CREATE INDEX IF NOT EXISTS idx_orders_tutory ON orders(tutory_id);
+            CREATE INDEX IF NOT EXISTS idx_orders_tutories ON orders(tutories_id);
             CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
+            CREATE INDEX IF NOT EXISTS idx_orders_session_time ON orders(session_time);
+            CREATE INDEX IF NOT EXISTS idx_chat_rooms_participants ON chat_rooms(learner_id, tutor_id);
+            CREATE INDEX IF NOT EXISTS idx_chat_messages_room ON chat_messages(room_id, sent_at);
+            CREATE INDEX IF NOT EXISTS idx_reviews_rating ON reviews(rating);
+            CREATE INDEX IF NOT EXISTS idx_fcm_tokens_user ON fcm_tokens(user_id);
         """)
 
         print("Database initialization completed successfully!")

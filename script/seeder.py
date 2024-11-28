@@ -50,26 +50,29 @@ class DataSeeder:
         self.tutor_ids = []
         self.subject_ids = {}
         self.tutory_ids = []
+        self.order_ids = []
         self.chat_room_ids = []
 
     def get_random_location(self):
-        city = random.choice(CITIES)
+        city = random.choice(list(DISTRICTS.keys()))
         district = random.choice(DISTRICTS[city])
         return city, district
 
-    def generate_availability(self) -> str:
+    def generate_availability(self) -> Dict:
+        """Generate availability following TutorAvailability type"""
         availability = {}
-        days = range(7)
-        hours = [f"{h:02d}:00" for h in range(8, 22)]
+        days = range(7)  # 0-6 for days of week
+        times = [f"{h:02d}:{m:02d}" for h in range(9, 17) for m in (0, 30)]
 
         for day in days:
-            if random.random() > 0.2:
-                num_slots = random.randint(1, 5)
-                availability[str(day)] = random.sample(hours, num_slots)
+            if random.random() > 0.3:  # 70% chance of having availability
+                num_slots = random.randint(2, 6)
+                availability[day] = sorted(random.sample(times, num_slots))
 
-        return json.dumps(availability)
+        return availability
 
     async def seed_subjects(self, conn):
+        """Seed subjects table"""
         for subject in tqdm(SUBJECTS, desc="Seeding subjects"):
             subject_id = uuid.uuid4()
             self.subject_ids[subject] = subject_id
@@ -80,25 +83,27 @@ class DataSeeder:
             """,
                 subject_id,
                 subject,
-                f"/icons/subjects/{subject.lower().replace(' ', '-')}.png",
+                f"https://storage.googleapis.com/tests/subjects/{subject}.png",
                 datetime.now()
             )
 
     async def seed_learners(self, conn):
+        """Seed learners and their interests"""
         used_emails = set()
 
         for _ in tqdm(range(self.num_learners), desc="Seeding learners"):
             learner_id = uuid.uuid4()
             self.learner_ids.append(learner_id)
+            city, district = self.get_random_location()
 
+            # Generate unique email
             while True:
                 email = f"learner_{uuid.uuid4().hex[:8]}@example.com"
                 if email not in used_emails:
                     used_emails.add(email)
                     break
 
-            city, district = self.get_random_location()
-
+            # Insert learner
             await conn.execute("""
                 INSERT INTO learners (
                     id, name, email, password, learning_style, gender,
@@ -108,7 +113,7 @@ class DataSeeder:
                 learner_id,
                 fake.name(),
                 email,
-                "hashed_password_here",
+                "password123",
                 random.choice(LEARNING_STYLES),
                 random.choice(GENDERS),
                 fake.phone_number()[:20],
@@ -117,21 +122,31 @@ class DataSeeder:
                 datetime.now()
             )
 
+            # Add interests (2-4 random subjects)
+            interests = random.sample(list(self.subject_ids.values()), random.randint(2, 4))
+            for subject_id in interests:
+                await conn.execute("""
+                    INSERT INTO interests (learner_id, subject_id)
+                    VALUES ($1, $2)
+                """, learner_id, subject_id)
+
     async def seed_tutors(self, conn):
+        """Seed tutors and their tutories"""
         used_emails = set()
 
         for _ in tqdm(range(self.num_tutors), desc="Seeding tutors"):
             tutor_id = uuid.uuid4()
             self.tutor_ids.append(tutor_id)
+            city, district = self.get_random_location()
 
+            # Generate unique email
             while True:
                 email = f"tutor_{uuid.uuid4().hex[:8]}@example.com"
                 if email not in used_emails:
                     used_emails.add(email)
                     break
 
-            city, district = self.get_random_location()
-
+            # Insert tutor
             await conn.execute("""
                 INSERT INTO tutors (
                     id, name, email, password, gender, phone_number,
@@ -141,7 +156,7 @@ class DataSeeder:
                 tutor_id,
                 fake.name(),
                 email,
-                "hashed_password_here",
+                "password123",
                 random.choice(GENDERS),
                 fake.phone_number()[:20],
                 city,
@@ -149,7 +164,7 @@ class DataSeeder:
                 datetime.now()
             )
 
-            # Create tutories
+            # Create tutories (1-3 per tutor)
             num_tutories = random.randint(1, 3)
             for _ in range(num_tutories):
                 tutory_id = uuid.uuid4()
@@ -166,63 +181,88 @@ class DataSeeder:
                     tutory_id,
                     tutor_id,
                     subject_id,
-                    fake.paragraph(),
-                    fake.paragraph(),
-                    random.randint(20, 100),
+                    fake.paragraph(nb_sentences=5),
+                    fake.paragraph(nb_sentences=7),
+                    random.randint(50000, 200000),  # 50k-200k IDR
                     random.choice(LESSON_TYPES),
-                    self.generate_availability(),
+                    json.dumps(self.generate_availability()),
                     datetime.now()
                 )
 
-    async def seed_orders(self, conn):
+    async def seed_orders_and_reviews(self, conn):
+        """Seed orders and reviews"""
         total_orders = len(self.learner_ids) * 2  # Average 2 orders per learner
 
-        with tqdm(total=total_orders, desc="Seeding orders") as pbar:
+        with tqdm(total=total_orders, desc="Seeding orders and reviews") as pbar:
             for learner_id in self.learner_ids:
-                # Generate 0-5 orders per learner
                 num_orders = random.randint(0, 5)
                 for _ in range(num_orders):
-                    tutory_id = random.choice(self.tutory_ids)
-                    tutor_id = await conn.fetchval(
-                        "SELECT tutor_id FROM tutories WHERE id = $1",
-                        tutory_id
-                    )
+                    # Create order
+                    order_id = uuid.uuid4()
+                    self.order_ids.append(order_id)
+                    tutories_id = random.choice(self.tutory_ids)
+
+                    session_time = fake.date_time_between(start_date="-3m", end_date="+1m")
+                    total_hours = random.randint(1, 4)
+                    estimated_end_time = session_time + timedelta(hours=total_hours)
+
+                    status = random.choice(ORDER_STATUSES)
 
                     await conn.execute("""
                         INSERT INTO orders (
-                            id, learner_id, tutor_id, tutory_id, session_time,
-                            total_hours, notes, status, created_at
+                            id, learner_id, tutories_id, session_time,
+                            estimated_end_time, total_hours, notes, status, created_at
                         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                     """,
-                        uuid.uuid4(),
+                        order_id,
                         learner_id,
-                        tutor_id,
-                        tutory_id,
-                        fake.date_time_between(start_date="-3m", end_date="+1m"),
-                        random.randint(1, 4),
+                        tutories_id,
+                        session_time,
+                        estimated_end_time,
+                        total_hours,
                         fake.paragraph() if random.random() > 0.5 else None,
-                        random.choice(ORDER_STATUSES),
+                        status,
                         datetime.now()
                     )
+
+                    # Add review for completed orders (80% chance)
+                    if status == "completed" and random.random() < 0.8:
+                        await conn.execute("""
+                            INSERT INTO reviews (
+                                id, order_id, rating, message, created_at
+                            ) VALUES ($1, $2, $3, $4, $5)
+                        """,
+                            uuid.uuid4(),
+                            order_id,
+                            random.randint(1, 5),
+                            fake.paragraph() if random.random() > 0.3 else None,
+                            datetime.now()
+                        )
+
                     pbar.update(1)
 
     async def run(self):
+        """Run the complete seeding process"""
         conn = await asyncpg.connect(settings.POSTGRES_URL)
 
         try:
             await self.seed_subjects(conn)
             await self.seed_learners(conn)
             await self.seed_tutors(conn)
-            await self.seed_orders(conn)
+            await self.seed_orders_and_reviews(conn)
 
             # Print statistics
-            print("\nSeeding completed:")
+            print("\nSeeding completed!")
             print(f"Subjects: {await conn.fetchval('SELECT COUNT(*) FROM subjects')}")
             print(f"Learners: {await conn.fetchval('SELECT COUNT(*) FROM learners')}")
             print(f"Tutors: {await conn.fetchval('SELECT COUNT(*) FROM tutors')}")
             print(f"Tutories: {await conn.fetchval('SELECT COUNT(*) FROM tutories')}")
             print(f"Orders: {await conn.fetchval('SELECT COUNT(*) FROM orders')}")
+            print(f"Reviews: {await conn.fetchval('SELECT COUNT(*) FROM reviews')}")
 
+        except Exception as e:
+            print(f"Error during seeding: {str(e)}")
+            raise
         finally:
             await conn.close()
 
