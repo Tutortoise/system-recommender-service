@@ -17,7 +17,10 @@ async def main():
         step_duration=30,
         request_timeout=10,
         think_time_min=0.5,
-        think_time_max=2.0
+        think_time_max=2.0,
+        enable_degradation_check=True,
+        max_error_rate=15.0,
+        max_p95_latency=3000.0
     )
 
     print(f"Starting load test at {datetime.now()}")

@@ -30,6 +30,9 @@ class LoadTestConfig:
     request_timeout: int = 5
     think_time_min: float = 0.1
     think_time_max: float = 1.0
+    enable_degradation_check: bool = True
+    max_error_rate: float = 10.0  # Maximum acceptable error rate (%)
+    max_p95_latency: float = 2000.0  # Maximum acceptable P95 latency (ms)
 
 
 class EnhancedLoadTester:
@@ -168,10 +171,17 @@ class EnhancedLoadTester:
             # Print interim results
             self._print_step_results(step_metrics, num_users)
 
-            # Check for degradation
-            if step_metrics["error_rate"] > 10 or step_metrics["p95_latency"] > 2000:
-                print("\nPerformance degradation detected. Stopping test.")
-                break
+            # Check for degradation only if enabled
+            if self.config.enable_degradation_check:
+                if (step_metrics["error_rate"] > self.config.max_error_rate or
+                    step_metrics["p95_latency"] > self.config.max_p95_latency):
+                    print("\nPerformance degradation detected:")
+                    if step_metrics["error_rate"] > self.config.max_error_rate:
+                        print(f"- Error rate ({step_metrics['error_rate']:.2f}%) exceeded threshold of {self.config.max_error_rate}%")
+                    if step_metrics["p95_latency"] > self.config.max_p95_latency:
+                        print(f"- P95 latency ({step_metrics['p95_latency']:.2f}ms) exceeded threshold of {self.config.max_p95_latency}ms")
+                    print("Stopping test.")
+                    break
 
             # Cool down period
             await asyncio.sleep(5)
