@@ -111,19 +111,23 @@ class FeatureProcessor:
 
             # Process rating stats with default values if rating_data is None
             rating_data = rating_data or {}
-            stats_vec = np.array([
-                rating_data.get("avg_rating", 0) / 5.0,  # Normalize rating to 0-1
-                rating_data.get("completion_rate", 0),  # Already 0-1
-            ])
+            stats_vec = np.array(
+                [
+                    rating_data.get("avg_rating", 0) / 5.0,  # Normalize rating to 0-1
+                    rating_data.get("completion_rate", 0),  # Already 0-1
+                ]
+            )
 
-            return np.concatenate([
-                subject_vector * 2.0,       # Highest weight for subject matching
-                methodology_vector * 0.8,   # Teaching methodology importance
-                location_vec * 0.5,         # Location importance
-                lesson_type_vec * 0.3,      # Lesson type importance
-                [price_vec * 0.4],         # Price importance
-                stats_vec * 0.6            # Stats importance
-            ])
+            return np.concatenate(
+                [
+                    subject_vector * 2.0,  # Highest weight for subject matching
+                    methodology_vector * 0.8,  # Teaching methodology importance
+                    location_vec * 0.5,  # Location importance
+                    lesson_type_vec * 0.3,  # Lesson type importance
+                    [price_vec * 0.4],  # Price importance
+                    stats_vec * 0.6,  # Stats importance
+                ]
+            )
 
         except Exception as e:
             logging.error(f"Feature processing error: {str(e)}", exc_info=True)
@@ -199,5 +203,9 @@ class FeatureProcessor:
         # Check lesson type preference
         if tutory.get("type_lesson") == "both":
             reasons.append("Flexible lesson format (online/offline)")
+
+        # Add category match reason
+        if tutory.get("category_name"):  # Changed from subject to category_name
+            reasons.append(f"Teaches {tutory['category_name']}")
 
         return reasons

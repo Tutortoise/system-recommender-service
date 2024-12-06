@@ -31,16 +31,29 @@ DISTRICTS = {
     "Yokohama": ["Naka", "Tsurumi", "Kanagawa", "Hodogaya", "Isogo"],
     "Nagoya": ["Chikusa", "Higashi", "Kita", "Naka", "Showa"],
     "Sapporo": ["Chuo", "Kita", "Higashi", "Shiroishi", "Toyohira"],
-    "Fukuoka": ["Hakata", "Chuo", "Higashi", "Jonan", "Sawara"]
+    "Fukuoka": ["Hakata", "Chuo", "Higashi", "Jonan", "Sawara"],
 }
 
 SUBJECTS = [
-    "Mathematics", "Physics", "Chemistry", "Biology",
-    "English", "Japanese", "Korean", "Chinese",
-    "Programming", "Web Development", "Data Science",
-    "Business", "Economics", "Accounting",
-    "Music", "Art", "Photography",
+    "Mathematics",
+    "Physics",
+    "Chemistry",
+    "Biology",
+    "English",
+    "Japanese",
+    "Korean",
+    "Chinese",
+    "Programming",
+    "Web Development",
+    "Data Science",
+    "Business",
+    "Economics",
+    "Accounting",
+    "Music",
+    "Art",
+    "Photography",
 ]
+
 
 class DataSeeder:
     def __init__(self, num_learners=1000, num_tutors=200):
@@ -48,7 +61,7 @@ class DataSeeder:
         self.num_tutors = num_tutors
         self.learner_ids = []
         self.tutor_ids = []
-        self.subject_ids = {}
+        self.category_ids = {}
         self.tutory_ids = []
         self.order_ids = []
         self.chat_room_ids = []
@@ -71,20 +84,21 @@ class DataSeeder:
 
         return availability
 
-    async def seed_subjects(self, conn):
-        """Seed subjects table"""
-        for subject in tqdm(SUBJECTS, desc="Seeding subjects"):
+    async def seed_categories(self, conn):
+        """Seed categories table"""
+        for subject in tqdm(SUBJECTS, desc="Seeding categories"):
             subject_id = uuid.uuid4()
-            self.subject_ids[subject] = subject_id
+            self.category_ids[subject] = subject_id
 
-            await conn.execute("""
-                INSERT INTO subjects (id, name, icon_url, created_at)
+            await conn.execute(
+                """
+                INSERT INTO categories (id, name, icon_url, created_at)
                 VALUES ($1, $2, $3, $4)
             """,
                 subject_id,
                 subject,
-                f"https://storage.googleapis.com/tests/subjects/{subject}.png",
-                datetime.now()
+                f"https://storage.googleapis.com/tests/categories/{subject}.png",
+                datetime.now(),
             )
 
     async def seed_learners(self, conn):
@@ -104,7 +118,8 @@ class DataSeeder:
                     break
 
             # Insert learner
-            await conn.execute("""
+            await conn.execute(
+                """
                 INSERT INTO learners (
                     id, name, email, password, learning_style, gender,
                     phone_number, city, district, created_at, updated_at
@@ -119,16 +134,22 @@ class DataSeeder:
                 fake.phone_number()[:20],
                 city,
                 district,
-                datetime.now()
+                datetime.now(),
             )
 
-            # Add interests (2-4 random subjects)
-            interests = random.sample(list(self.subject_ids.values()), random.randint(2, 4))
-            for subject_id in interests:
-                await conn.execute("""
-                    INSERT INTO interests (learner_id, subject_id)
+            # Add interests (2-4 random categories)
+            interests = random.sample(
+                list(self.category_ids.values()), random.randint(2, 4)
+            )
+            for category_id in interests:  # Changed variable name for clarity
+                await conn.execute(
+                    """
+                    INSERT INTO interests (learner_id, category_id)
                     VALUES ($1, $2)
-                """, learner_id, subject_id)
+                """,  # Changed subject_id to category_id
+                    learner_id,
+                    category_id,
+                )
 
     async def seed_tutors(self, conn):
         """Seed tutors and their tutories"""
@@ -147,7 +168,8 @@ class DataSeeder:
                     break
 
             # Insert tutor
-            await conn.execute("""
+            await conn.execute(
+                """
                 INSERT INTO tutors (
                     id, name, email, password, gender, phone_number,
                     city, district, created_at, updated_at
@@ -161,7 +183,7 @@ class DataSeeder:
                 fake.phone_number()[:20],
                 city,
                 district,
-                datetime.now()
+                datetime.now(),
             )
 
             # Create tutories (1-3 per tutor)
@@ -169,24 +191,27 @@ class DataSeeder:
             for _ in range(num_tutories):
                 tutory_id = uuid.uuid4()
                 self.tutory_ids.append(tutory_id)
-                subject = random.choice(SUBJECTS)
-                subject_id = self.subject_ids[subject]
+                category = random.choice(SUBJECTS)
+                category_id = self.category_ids[category]
 
-                await conn.execute("""
+                await conn.execute(
+                    """
                     INSERT INTO tutories (
-                        id, tutor_id, subject_id, about_you, teaching_methodology,
-                        hourly_rate, type_lesson, availability, created_at, updated_at
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9)
+                        id, tutor_id, category_id, name, about_you,
+                        teaching_methodology, hourly_rate, type_lesson,
+                        is_enabled, created_at, updated_at
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10)
                 """,
                     tutory_id,
                     tutor_id,
-                    subject_id,
+                    category_id,
+                    f"{category} Tutoring",
                     fake.paragraph(nb_sentences=5),
                     fake.paragraph(nb_sentences=7),
-                    random.randint(50000, 200000),  # 50k-200k IDR
+                    random.randint(50000, 200000),
                     random.choice(LESSON_TYPES),
-                    json.dumps(self.generate_availability()),
-                    datetime.now()
+                    True,
+                    datetime.now(),
                 )
 
     async def seed_orders_and_reviews(self, conn):
@@ -197,22 +222,24 @@ class DataSeeder:
             for learner_id in self.learner_ids:
                 num_orders = random.randint(0, 5)
                 for _ in range(num_orders):
-                    # Create order
                     order_id = uuid.uuid4()
                     self.order_ids.append(order_id)
                     tutories_id = random.choice(self.tutory_ids)
 
-                    session_time = fake.date_time_between(start_date="-3m", end_date="+1m")
+                    session_time = fake.date_time_between(
+                        start_date="-3m", end_date="+1m"
+                    )
                     total_hours = random.randint(1, 4)
                     estimated_end_time = session_time + timedelta(hours=total_hours)
-
                     status = random.choice(ORDER_STATUSES)
 
-                    await conn.execute("""
+                    await conn.execute(
+                        """
                         INSERT INTO orders (
                             id, learner_id, tutories_id, session_time,
-                            estimated_end_time, total_hours, notes, status, created_at
-                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                            estimated_end_time, total_hours, notes,
+                            type_lesson, status, price, created_at
+                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
                     """,
                         order_id,
                         learner_id,
@@ -221,13 +248,16 @@ class DataSeeder:
                         estimated_end_time,
                         total_hours,
                         fake.paragraph() if random.random() > 0.5 else None,
+                        random.choice(LESSON_TYPES),  # type_lesson
                         status,
-                        datetime.now()
+                        random.randint(100000, 500000),  # price
+                        datetime.now(),
                     )
 
                     # Add review for completed orders (80% chance)
                     if status == "completed" and random.random() < 0.8:
-                        await conn.execute("""
+                        await conn.execute(
+                            """
                             INSERT INTO reviews (
                                 id, order_id, rating, message, created_at
                             ) VALUES ($1, $2, $3, $4, $5)
@@ -236,7 +266,7 @@ class DataSeeder:
                             order_id,
                             random.randint(1, 5),
                             fake.paragraph() if random.random() > 0.3 else None,
-                            datetime.now()
+                            datetime.now(),
                         )
 
                     pbar.update(1)
@@ -246,14 +276,16 @@ class DataSeeder:
         conn = await asyncpg.connect(settings.POSTGRES_URL)
 
         try:
-            await self.seed_subjects(conn)
+            await self.seed_categories(conn)
             await self.seed_learners(conn)
             await self.seed_tutors(conn)
             await self.seed_orders_and_reviews(conn)
 
             # Print statistics
             print("\nSeeding completed!")
-            print(f"Subjects: {await conn.fetchval('SELECT COUNT(*) FROM subjects')}")
+            print(
+                f"categories: {await conn.fetchval('SELECT COUNT(*) FROM categories')}"
+            )
             print(f"Learners: {await conn.fetchval('SELECT COUNT(*) FROM learners')}")
             print(f"Tutors: {await conn.fetchval('SELECT COUNT(*) FROM tutors')}")
             print(f"Tutories: {await conn.fetchval('SELECT COUNT(*) FROM tutories')}")
@@ -265,6 +297,7 @@ class DataSeeder:
             raise
         finally:
             await conn.close()
+
 
 if __name__ == "__main__":
     seeder = DataSeeder(num_learners=10000, num_tutors=2000)

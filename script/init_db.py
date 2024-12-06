@@ -6,13 +6,13 @@ from pathlib import Path
 sys.path.append(str(Path(__file__).parent.parent))
 from config import settings
 
+
 async def init_db():
     conn = await asyncpg.connect(settings.POSTGRES_URL)
 
     try:
         # Drop existing tables and types
         await conn.execute("""
-            DROP TABLE IF EXISTS recommendation_cache CASCADE;
             DROP TABLE IF EXISTS reviews CASCADE;
             DROP TABLE IF EXISTS chat_messages CASCADE;
             DROP TABLE IF EXISTS chat_rooms CASCADE;
@@ -22,7 +22,7 @@ async def init_db():
             DROP TABLE IF EXISTS tutories CASCADE;
             DROP TABLE IF EXISTS tutors CASCADE;
             DROP TABLE IF EXISTS learners CASCADE;
-            DROP TABLE IF EXISTS subjects CASCADE;
+            DROP TABLE IF EXISTS categories CASCADE;
 
             DROP TYPE IF EXISTS message_type_enum CASCADE;
             DROP TYPE IF EXISTS user_role_enum CASCADE;
@@ -48,8 +48,8 @@ async def init_db():
 
         # Create tables
         await conn.execute("""
-            -- Subjects table
-            CREATE TABLE IF NOT EXISTS subjects (
+            -- categories table
+            CREATE TABLE IF NOT EXISTS categories (
                 id UUID PRIMARY KEY,
                 name VARCHAR(255) NOT NULL,
                 icon_url VARCHAR(255),
@@ -71,11 +71,11 @@ async def init_db():
                 updated_at TIMESTAMP
             );
 
-            -- Interests table (many-to-many between learners and subjects)
+            -- Interests table (many-to-many between learners and categories)
             CREATE TABLE IF NOT EXISTS interests (
                 learner_id UUID REFERENCES learners(id) ON DELETE CASCADE,
-                subject_id UUID REFERENCES subjects(id) ON DELETE CASCADE,
-                PRIMARY KEY (learner_id, subject_id)
+                category_id UUID REFERENCES categories(id) ON DELETE CASCADE,
+                PRIMARY KEY (learner_id, category_id)
             );
 
             -- Tutors table
@@ -96,12 +96,13 @@ async def init_db():
             CREATE TABLE IF NOT EXISTS tutories (
                 id UUID PRIMARY KEY,
                 tutor_id UUID REFERENCES tutors(id) ON DELETE CASCADE,
-                subject_id UUID REFERENCES subjects(id) ON DELETE CASCADE,
+                category_id UUID REFERENCES categories(id) ON DELETE CASCADE,
+                name VARCHAR(50) NOT NULL,
                 about_you TEXT NOT NULL,
                 teaching_methodology TEXT NOT NULL,
                 hourly_rate INTEGER NOT NULL,
-                type_lesson type_lesson_enum,
-                availability JSONB,
+                type_lesson type_lesson_enum NOT NULL,
+                is_enabled BOOLEAN NOT NULL DEFAULT TRUE,
                 created_at TIMESTAMP NOT NULL DEFAULT NOW(),
                 updated_at TIMESTAMP
             );
@@ -115,7 +116,9 @@ async def init_db():
                 estimated_end_time TIMESTAMP,
                 total_hours INTEGER NOT NULL,
                 notes TEXT,
+                type_lesson type_lesson_enum NOT NULL,
                 status status_enum,
+                price INTEGER NOT NULL,
                 created_at TIMESTAMP NOT NULL DEFAULT NOW()
             );
 
@@ -158,25 +161,18 @@ async def init_db():
                 message TEXT,
                 created_at TIMESTAMP NOT NULL DEFAULT NOW()
             );
-
-            -- Recommendation cache table
-            CREATE TABLE IF NOT EXISTS recommendation_cache (
-                learner_id UUID PRIMARY KEY REFERENCES learners(id),
-                recommendations JSONB,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
         """)
 
         # Create indexes
         await conn.execute("""
             -- Indexes for efficient querying
-            CREATE INDEX IF NOT EXISTS idx_subjects_name ON subjects(name);
+            CREATE INDEX IF NOT EXISTS idx_categories_name ON categories(name);
             CREATE INDEX IF NOT EXISTS idx_learners_city_district ON learners(city, district);
             CREATE INDEX IF NOT EXISTS idx_tutors_city_district ON tutors(city, district);
-            CREATE INDEX IF NOT EXISTS idx_tutories_tutor_subject ON tutories(tutor_id, subject_id);
+            CREATE INDEX IF NOT EXISTS idx_tutories_tutor_category ON tutories(tutor_id, category_id);
             CREATE INDEX IF NOT EXISTS idx_tutories_hourly_rate ON tutories(hourly_rate);
             CREATE INDEX IF NOT EXISTS idx_tutories_type_lesson ON tutories(type_lesson);
+            CREATE INDEX IF NOT EXISTS idx_tutories_created_at ON tutories(created_at);
             CREATE INDEX IF NOT EXISTS idx_orders_learner ON orders(learner_id);
             CREATE INDEX IF NOT EXISTS idx_orders_tutories ON orders(tutories_id);
             CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
@@ -194,6 +190,7 @@ async def init_db():
         raise
     finally:
         await conn.close()
+
 
 if __name__ == "__main__":
     asyncio.run(init_db())

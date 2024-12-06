@@ -76,17 +76,27 @@ class RecommenderService:
                 # Get learner data
                 learner = await conn.fetchrow(
                     """
+                    WITH learner_interests AS (
+                        SELECT
+                            i.learner_id,
+                            array_agg(c.name) as interests
+                        FROM interests i
+                        JOIN categories c ON i.category_id = c.id
+                        GROUP BY i.learner_id
+                    )
                     SELECT
-                        id,
-                        email,
-                        name,
-                        learning_style,
-                        gender,
-                        city,
-                        district
-                    FROM learners
-                    WHERE id = $1
-                """,
+                        l.id,
+                        l.email,
+                        l.name,
+                        l.learning_style,
+                        l.gender,
+                        l.city,
+                        l.district,
+                        li.interests
+                    FROM learners l
+                    LEFT JOIN learner_interests li ON l.id = li.learner_id
+                    WHERE l.id = $1
+                    """,
                     user_id,
                 )
 
@@ -106,6 +116,7 @@ class RecommenderService:
                         "learning_style": learner["learning_style"],
                         "city": learner["city"],
                         "district": learner["district"],
+                        "interests": learner["interests"] or [],
                     }
                 )
 
@@ -125,44 +136,38 @@ class RecommenderService:
                             t.city,
                             t.district,
                             ty.id as tutories_id,
-                            s.name as subject_name,
+                            c.name as category_name,
+                            ty.name as tutory_name,
                             ty.about_you,
                             ty.teaching_methodology,
                             ty.hourly_rate,
                             ty.type_lesson,
-                            ty.availability,
                             COUNT(o.id) as total_orders,
                             COUNT(CASE WHEN o.status = 'completed' THEN 1 END) as completed_orders
                         FROM tutors t
                         INNER JOIN tutories ty ON t.id = ty.tutor_id
-                        INNER JOIN subjects s ON ty.subject_id = s.id
+                        INNER JOIN categories c ON ty.category_id = c.id
                         LEFT JOIN orders o ON ty.id = o.tutories_id
                         WHERE t.id::text = ANY($1)
+                        AND ty.is_enabled = true
+                        AND (
+                            -- Include if tutor offers online lessons
+                            ty.type_lesson IN ('online', 'both')
+                            OR
+                            -- Include if tutor is in same city for offline lessons
+                            (ty.type_lesson = 'offline' AND t.city = $2)
+                        )
                         GROUP BY
                             t.id, t.name, t.email, t.gender, t.city, t.district,
-                            ty.id, s.name, ty.about_you, ty.teaching_methodology,
-                            ty.hourly_rate, ty.type_lesson, ty.availability
+                            ty.id, c.name, ty.name, ty.about_you, ty.teaching_methodology,
+                            ty.hourly_rate, ty.type_lesson
                     )
-                    SELECT
-                        tutor_id,
-                        name,
-                        email,
-                        gender,
-                        city,
-                        district,
-                        tutories_id,
-                        subject_name,
-                        about_you,
-                        teaching_methodology,
-                        hourly_rate,
-                        type_lesson,
-                        availability,
-                        total_orders,
-                        completed_orders
+                    SELECT *
                     FROM tutor_stats
                     ORDER BY completed_orders DESC, total_orders DESC
-                """,
+                    """,
                     tutor_ids_str,
+                    learner["city"],  # Add learner's city as a parameter
                 )
 
                 recommendations = []
@@ -172,11 +177,33 @@ class RecommenderService:
                         {"city": tutor["city"], "district": tutor["district"]},
                     )
 
+                    lesson_type = tutor["type_lesson"].lower()
+                    availability_info = {
+                        "can_teach_online": lesson_type in ["online", "both"],
+                        "can_teach_offline": lesson_type in ["offline", "both"],
+                        "same_city": tutor["city"].lower() == learner["city"].lower(),
+                    }
+
                     match_reasons = self.feature_processor._get_match_reasons(
                         learner,
                         tutor,
-                        tutor,  # tutory data is part of tutor data in our query
+                        {
+                            "hourly_rate": tutor["hourly_rate"],
+                            "type_lesson": tutor["type_lesson"],
+                            "category_name": tutor["category_name"],
+                        },
                     )
+
+                    # Add availability-specific reasons
+                    if availability_info["can_teach_online"]:
+                        match_reasons.append("Available for online lessons")
+                    if (
+                        availability_info["can_teach_offline"]
+                        and availability_info["same_city"]
+                    ):
+                        match_reasons.append(
+                            "Available for in-person lessons in your city"
+                        )
 
                     recommendation = {
                         "tutor_id": str(tutor["tutor_id"]),
@@ -185,16 +212,17 @@ class RecommenderService:
                         "email": tutor["email"],
                         "city": tutor["city"],
                         "district": tutor["district"],
-                        "subject": tutor["subject_name"],
+                        "category": tutor["category_name"],
+                        "tutory_name": tutor["tutory_name"],
                         "about": tutor["about_you"],
                         "methodology": tutor["teaching_methodology"],
                         "hourly_rate": float(tutor["hourly_rate"]),
                         "type_lesson": tutor["type_lesson"],
                         "completed_orders": int(tutor["completed_orders"]),
                         "total_orders": int(tutor["total_orders"]),
-                        "availability": tutor["availability"],
                         "match_reasons": match_reasons,
                         "location_match": location_match,
+                        "availability": availability_info,
                     }
 
                     recommendations.append(recommendation)
@@ -205,6 +233,9 @@ class RecommenderService:
                         "name": learner["name"],
                         "email": learner["email"],
                         "learning_style": learner["learning_style"],
+                        "city": learner["city"],
+                        "district": learner["district"],
+                        "interests": learner["interests"] or [],
                     },
                     "recommendations": recommendations,
                 }
@@ -273,7 +304,9 @@ class RecommenderService:
 
             async with self.pg_pool.acquire() as conn:
                 # First, collect all texts for fitting
-                subjects = await conn.fetch("SELECT name FROM subjects")
+                categories = await conn.fetch(
+                    "SELECT name FROM categories"
+                )  # Changed from subjects
                 tutories = await conn.fetch("""
                     SELECT teaching_methodology, about_you
                     FROM tutories
@@ -282,9 +315,9 @@ class RecommenderService:
                 # Prepare texts for fitting
                 all_texts = []
 
-                # Add subject names
-                for subject in subjects:
-                    all_texts.append(subject["name"])
+                # Add category names
+                for category in categories:
+                    all_texts.append(category["name"])
 
                 # Add teaching methodologies and about texts
                 for tutory in tutories:
@@ -301,9 +334,9 @@ class RecommenderService:
                     WITH learner_interests AS (
                         SELECT
                             i.learner_id,
-                            array_agg(s.name) as interests
+                            array_agg(c.name) as interests
                         FROM interests i
-                        JOIN subjects s ON i.subject_id = s.id
+                        JOIN categories c ON i.category_id = c.id
                         GROUP BY i.learner_id
                     )
                     SELECT
@@ -322,7 +355,8 @@ class RecommenderService:
                         SELECT
                             t.id as tutor_id,
                             ty.id as tutories_id,
-                            s.name as subject_name,
+                            c.name as category_name,
+                            ty.name as tutory_name,
                             ty.teaching_methodology,
                             ty.hourly_rate,
                             ty.type_lesson,
@@ -334,10 +368,11 @@ class RecommenderService:
                             COUNT(r.id) as review_count
                         FROM tutors t
                         JOIN tutories ty ON t.id = ty.tutor_id
-                        JOIN subjects s ON ty.subject_id = s.id
+                        JOIN categories c ON ty.category_id = c.id
                         LEFT JOIN orders o ON ty.id = o.tutories_id
                         LEFT JOIN reviews r ON o.id = r.order_id
-                        GROUP BY t.id, ty.id, s.name
+                        WHERE ty.is_enabled = true
+                        GROUP BY t.id, ty.id, c.name
                     )
                     SELECT
                         *,
@@ -348,31 +383,37 @@ class RecommenderService:
                 # Process features
                 learner_features = {}
                 for learner in learners:
-                    learner_features[learner["learner_id"]] = self.feature_processor.process_user_features({
-                        "learning_style": learner["learning_style"],
-                        "city": learner["city"],
-                        "district": learner["district"],
-                        "interests": learner["interests"]
-                    })
+                    learner_features[learner["learner_id"]] = (
+                        self.feature_processor.process_user_features(
+                            {
+                                "learning_style": learner["learning_style"],
+                                "city": learner["city"],
+                                "district": learner["district"],
+                                "interests": learner["interests"],
+                            }
+                        )
+                    )
 
                 tutor_features = {}
                 for tutor in tutors:
-                    tutor_features[tutor["tutor_id"]] = self.feature_processor.process_tutor_features(
-                        {
-                            "city": tutor["city"],
-                            "district": tutor["district"]
-                        },
-                        {
-                            "subject": tutor["subject_name"],
-                            "teaching_methodology": tutor["teaching_methodology"],
-                            "hourly_rate": float(tutor["hourly_rate"]),
-                            "type_lesson": tutor["type_lesson"]
-                        },
-                        {
-                            "avg_rating": float(tutor["avg_rating"] or 0),
-                            "completion_rate": float(tutor["completion_rate"]),
-                            "review_count": int(tutor["review_count"])
-                        }
+                    tutor_features[tutor["tutor_id"]] = (
+                        self.feature_processor.process_tutor_features(
+                            {"city": tutor["city"], "district": tutor["district"]},
+                            {
+                                "subject": tutor[
+                                    "category_name"
+                                ],  # Changed from subject_name
+                                "name": tutor["tutory_name"],  # Added tutory name
+                                "teaching_methodology": tutor["teaching_methodology"],
+                                "hourly_rate": float(tutor["hourly_rate"]),
+                                "type_lesson": tutor["type_lesson"],
+                            },
+                            {
+                                "avg_rating": float(tutor["avg_rating"] or 0),
+                                "completion_rate": float(tutor["completion_rate"]),
+                                "review_count": int(tutor["review_count"]),
+                            },
+                        )
                     )
 
                 # Update recommender
