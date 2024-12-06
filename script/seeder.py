@@ -201,7 +201,7 @@ class DataSeeder:
                         teaching_methodology, hourly_rate, type_lesson,
                         is_enabled, created_at, updated_at
                     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10)
-                """,
+                    """,
                     tutory_id,
                     tutor_id,
                     category_id,

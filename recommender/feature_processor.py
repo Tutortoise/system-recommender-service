@@ -149,11 +149,6 @@ class FeatureProcessor:
         }
         return np.array(types.get(lesson_type.lower(), [0, 0, 0]))
 
-    def _encode_city(self, city: str) -> float:
-        if not city:
-            return 0.0
-        return (hash(city) % 1000) / 1000.0
-
     def _encode_location(self, city: str, district: str) -> np.ndarray:
         if not city or not district:
             return np.zeros(2)
@@ -165,21 +160,6 @@ class FeatureProcessor:
     def _encode_price(self, hourly_rate: int) -> float:
         # Normalize price to 0-1 range (assuming max price is 1000)
         return min(float(hourly_rate) / 10_000_000.0, 1.0)
-
-    def _encode_rating(self, rating_data: Dict) -> float:
-        """Encode rating information into a feature"""
-        if not rating_data:
-            return 0.0
-
-        avg_rating = rating_data.get("average_rating", 0)
-        num_ratings = rating_data.get("num_ratings", 0)
-
-        # Weighted rating calculation (similar to IMDB weighted rating)
-        C = 10  # minimum number of ratings required for weight
-        m = 3.0  # minimum rating threshold
-
-        weighted_rating = (C * m + num_ratings * avg_rating) / (C + num_ratings)
-        return min(weighted_rating / 5.0, 1.0)  # Normalize to [0,1]
 
     def _get_match_reasons(self, learner: Dict, tutor: Dict, tutory: Dict) -> List[str]:
         reasons = []

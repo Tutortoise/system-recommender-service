@@ -1,13 +1,6 @@
-import os
-import logging
-
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"  # Suppress TF logging
-logging.getLogger("tensorflow").setLevel(logging.ERROR)
-
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Query
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-import uvicorn
 from contextlib import asynccontextmanager
 
 from recommender.service import RecommenderService
@@ -38,29 +31,68 @@ app.add_middleware(
 
 
 @app.get("/recommendations/{user_id}")
-async def get_recommendations(user_id: str, top_k: int = 5):
+async def get_recommendations(
+    user_id: str,
+    top_k: int = 5,
+    strict: bool = False,
+):
     try:
         data = await recommender_service.get_recommendations(user_id, top_k)
+        if strict and data["total_found"] < top_k:
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "code": "INSUFFICIENT_RECOMMENDATIONS",
+                    "message": f"Could only find {data['total_found']} recommendations of {top_k} requested",
+                },
+            )
         return JSONResponse(
-            status_code=200,
-            content={
-                "status": "success",
-                "data": data,
-                "code": "RECOMMENDATIONS_FOUND",
-            },
+            status_code=200, content={"status": "success", "data": data}
         )
     except HTTPException:
         raise
 
+
+@app.get("/interaction/{user_id}/{tutories_id}")
+async def track_interaction(
+    user_id: str,
+    tutories_id: str,
+):
+    """Track user clicks on tutories"""
+    try:
+        async with recommender_service.pg_pool.acquire() as conn:
+            tutory = await conn.fetchrow(
+                """
+                SELECT
+                    ty.id as tutory_id,
+                    ty.tutor_id,
+                    ty.category_id,
+                    c.name as category_name
+                FROM tutories ty
+                JOIN categories c ON ty.category_id = c.id
+                WHERE ty.id = $1
+                """,
+                tutories_id,
+            )
+
+            if not tutory:
+                raise HTTPException(status_code=404, detail="Tutory not found")
+
+            success = recommender_service.recommender.process_interaction(
+                user_id=user_id,
+                tutory_id=tutories_id,
+                tutor_id=str(tutory["tutor_id"]),
+                category_id=str(tutory["category_id"]),
+                category_name=tutory["category_name"],
+            )
+
+            return {
+                "status": "success" if success else "failed",
+                "message": "Click interaction recorded",
+            }
+
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail={
-                "code": "INTERNAL_ERROR",
-                "message": "An unexpected error occurred",
-                "error": str(e),
-            },
-        )
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/model/update")
@@ -91,9 +123,6 @@ async def trigger_model_update(background_tasks: BackgroundTasks):
 async def reset_model():
     """Reset model state and clear caches"""
     try:
-        # Clear caches
-        recommender_service.recommender.similarity_cache.clear()
-
         # Reset states
         recommender_service._model_ready = False
         recommender_service.is_updating = False
@@ -111,9 +140,9 @@ async def reset_model():
 
 @app.get("/model/status")
 async def get_model_status():
-    """
-    Get the current status of the recommendation model
-    """
+    """Get the current status of the recommendation model"""
+    tracker = recommender_service.recommender.interaction_tracker
+
     return {
         "is_ready": recommender_service._model_ready,
         "is_updating": recommender_service.is_updating,
@@ -121,6 +150,12 @@ async def get_model_status():
         "total_users": len(recommender_service.recommender.user_features),
         "total_mentors": len(recommender_service.recommender.mentor_features),
         "cache_size": len(recommender_service.recommender.similarity_cache),
+        "interaction_stats": {
+            "total_users_with_interactions": len(tracker.interactions),
+            "total_interactions": sum(
+                len(ints) for ints in tracker.interactions.values()
+            ),
+        },
     }
 
 
