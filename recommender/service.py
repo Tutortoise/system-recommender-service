@@ -23,12 +23,12 @@ class RecommenderService:
         self._model_ready = False
         self._lock = asyncio.Lock()
 
-        self.cleanup_interval = 3600  # 1 hour in seconds
+        self.cleanup_interval = settings.CLEANUP_INTERVAL
         asyncio.create_task(self.periodic_cleanup())
 
     async def initialize(self):
         self.pg_pool = await asyncpg.create_pool(
-            settings.POSTGRES_URL,
+            settings.DATABASE_URL,
             min_size=5,
             max_size=20,
             command_timeout=60,
