@@ -1,0 +1,13 @@
+steps:
+- name: 'gcr.io/cloud-builders/docker'
+  args: ['build', '-t', 'asia-southeast2-docker.pkg.dev/${PROJECT_ID}/tutortoise/system-recommender-service', '.']
+  env:
+    - 'DOCKER_BUILDKIT=1'
+
+  # Docker Push
+- name: 'gcr.io/cloud-builders/docker'
+  args: ['push',
+         'asia-southeast2-docker.pkg.dev/${PROJECT_ID}/tutortoise/system-recommender-service']
+
+options:
+  logging: CLOUD_LOGGING_ONLY
