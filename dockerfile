@@ -5,49 +5,24 @@ WORKDIR /build
 RUN apt-get update && apt-get install -y \
     build-essential \
     python3-dev \
-    cmake \
-    libboost-all-dev \
-    libfmt-dev \
-    libc6-dev \
-    libspdlog-dev \
-    libeigen3-dev \
-    zlib1g-dev \
-    cython3 \
-    gcc \
-    g++ \
-    python3-numpy \
-    git \
+    wget \
     && rm -rf /var/lib/apt/lists/*
 
 ENV UV_SYSTEM_PYTHON=1 \
-    UV_COMPILE_BYTECODE=1 \
-    CFLAGS="-fPIC" \
-    CXXFLAGS="-fPIC" \
-    PYTHONPATH=/usr/local/lib/python3.10/site-packages
+    UV_COMPILE_BYTECODE=1
 
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system numpy scipy cython
-
-# Build gensim from source
-WORKDIR /build/gensim
-RUN git clone --depth 1 --branch 4.3.3 https://github.com/RaRe-Technologies/gensim.git . && \
-    python3 setup.py build_ext --inplace && \
-    python3 setup.py install
-
-# Test gensim installation
-RUN python3 -c "from gensim.models import Word2Vec; print('gensim installation successful')"
-
-# Install remaining dependencies
-WORKDIR /build
+# Install core dependencies first
 COPY pyproject.toml uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv \
-    sed -i '/gensim/d' pyproject.toml && \
-    uv pip install --system -r pyproject.toml
+    uv pip install --system numpy scipy wget
 
-# Create separate directory for project installation
-WORKDIR /build/project
+# Copy application code
 COPY recommender/ recommender/
+COPY script/ script/
 COPY config.py ./
+
+# Set up embeddings
+RUN python3 script/convert_embeddings.py
 
 # Create setup.py for project installation
 RUN echo 'from setuptools import setup, find_packages\n\
@@ -64,21 +39,13 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 FROM python:3.10-slim-bookworm
 
 RUN apt-get update && apt-get install -y \
-    libboost-python-dev \
     libgomp1 \
-    libblas3 \
-    liblapack3 \
-    libatlas3-base \
-    libgfortran5 \
-    libopenblas0 \
     && rm -rf /var/lib/apt/lists/*
 
 RUN useradd -m app
 
 COPY --from=builder /usr/local/lib/python3.10/site-packages/ /usr/local/lib/python3.10/site-packages/
-COPY --from=builder /usr/local/bin/ /usr/local/bin/
-COPY --from=builder /build/gensim/build/ /build/gensim/build/
-COPY --from=builder /build/gensim/gensim/ /build/gensim/gensim/
+COPY --from=builder /build/recommender/embedding_model/ /app/recommender/embedding_model/
 
 WORKDIR /app
 RUN chown -R app:app /app
@@ -89,9 +56,7 @@ COPY --chown=app:app config.py ./
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PATH="/home/app/.local/bin:$PATH" \
-    PYTHONPATH="/build/gensim:/usr/local/lib/python3.10/site-packages" \
-    LD_LIBRARY_PATH="/usr/lib/x86_64-linux-gnu"
+    PATH="/home/app/.local/bin:$PATH"
 
 EXPOSE 8000
 

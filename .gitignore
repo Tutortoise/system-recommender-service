@@ -91,3 +91,5 @@ redis_data/*
 postgres_data/*
 .idea
 *.vw
+*.npy
+*.vocab.txt

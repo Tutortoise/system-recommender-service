@@ -1,4 +1,3 @@
-from gensim.models import Word2Vec
 import numpy as np
 from typing import List, Dict
 import logging
@@ -9,7 +8,7 @@ class FeatureProcessor:
     def __init__(self):
         self.is_fitted = False
         self.feature_dim = None
-        self.vector_size = 300  # Match Google's Word2Vec dimensions
+        self.vector_size = 50
         self.subject_embedding = SubjectEmbedding(vector_size=self.vector_size)
 
     def fit(self, texts: List[str]):

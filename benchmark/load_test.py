@@ -50,7 +50,7 @@ class EnhancedLoadTester:
         self.start_time = None
 
     async def setup(self):
-        conn = await asyncpg.connect(settings.POSTGRES_URL)
+        conn = await asyncpg.connect(settings.DATABASE_URL)
         try:
             rows = await conn.fetch("SELECT id FROM learners")
             if not rows:
@@ -173,13 +173,19 @@ class EnhancedLoadTester:
 
             # Check for degradation only if enabled
             if self.config.enable_degradation_check:
-                if (step_metrics["error_rate"] > self.config.max_error_rate or
-                    step_metrics["p95_latency"] > self.config.max_p95_latency):
+                if (
+                    step_metrics["error_rate"] > self.config.max_error_rate
+                    or step_metrics["p95_latency"] > self.config.max_p95_latency
+                ):
                     print("\nPerformance degradation detected:")
                     if step_metrics["error_rate"] > self.config.max_error_rate:
-                        print(f"- Error rate ({step_metrics['error_rate']:.2f}%) exceeded threshold of {self.config.max_error_rate}%")
+                        print(
+                            f"- Error rate ({step_metrics['error_rate']:.2f}%) exceeded threshold of {self.config.max_error_rate}%"
+                        )
                     if step_metrics["p95_latency"] > self.config.max_p95_latency:
-                        print(f"- P95 latency ({step_metrics['p95_latency']:.2f}ms) exceeded threshold of {self.config.max_p95_latency}ms")
+                        print(
+                            f"- P95 latency ({step_metrics['p95_latency']:.2f}ms) exceeded threshold of {self.config.max_p95_latency}ms"
+                        )
                     print("Stopping test.")
                     break
 

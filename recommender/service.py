@@ -260,6 +260,65 @@ class RecommenderService:
                         if len(recommendations) >= top_k:
                             break
 
+                        tutor_id = str(tutor["tutor_id"])
+                        if tutor_id in seen_tutors:
+                            continue
+                        seen_tutors.add(tutor_id)
+
+                        location_match = self._calculate_location_match(
+                            {"city": learner["city"], "district": learner["district"]},
+                            {"city": tutor["city"], "district": tutor["district"]},
+                        )
+
+                        lesson_type = tutor["type_lesson"].lower()
+                        availability_info = {
+                            "can_teach_online": lesson_type in ["online", "both"],
+                            "can_teach_offline": lesson_type in ["offline", "both"],
+                            "same_city": tutor["city"].lower()
+                            == learner["city"].lower(),
+                        }
+
+                        match_reasons = self.feature_processor._get_match_reasons(
+                            learner,
+                            tutor,
+                            {
+                                "hourly_rate": tutor["hourly_rate"],
+                                "type_lesson": tutor["type_lesson"],
+                                "category_name": tutor["category_name"],
+                            },
+                        )
+
+                        # Add availability-specific reasons
+                        if availability_info["can_teach_online"]:
+                            match_reasons.append("Available for online lessons")
+                        if (
+                            availability_info["can_teach_offline"]
+                            and availability_info["same_city"]
+                        ):
+                            match_reasons.append(
+                                "Available for in-person lessons in your city"
+                            )
+
+                        recommendation = {
+                            "tutor_id": str(tutor["tutor_id"]),
+                            "tutories_id": str(tutor["tutories_id"]),
+                            "name": tutor["name"],
+                            "email": tutor["email"],
+                            "city": tutor["city"],
+                            "district": tutor["district"],
+                            "category": tutor["category_name"],
+                            "tutory_name": tutor["tutory_name"],
+                            "about": tutor["about_you"],
+                            "methodology": tutor["teaching_methodology"],
+                            "hourly_rate": float(tutor["hourly_rate"]),
+                            "type_lesson": tutor["type_lesson"],
+                            "completed_orders": int(tutor["completed_orders"]),
+                            "total_orders": int(tutor["total_orders"]),
+                            "match_reasons": match_reasons,
+                            "location_match": location_match,
+                            "availability": availability_info,
+                        }
+
                         recommendations.append(recommendation)
 
                 response = {
@@ -307,22 +366,45 @@ class RecommenderService:
             # Get recommendations with relaxed constraints
             additional_tutors = await conn.fetch(
                 """
-                SELECT
-                    t.id as tutor_id,
-                    -- ... (same fields as before)
-                FROM tutors t
-                INNER JOIN tutories ty ON t.id = ty.tutor_id
-                INNER JOIN categories c ON ty.category_id = c.id
-                LEFT JOIN orders o ON ty.id = o.tutories_id
-                WHERE ty.is_enabled = true
-                AND t.id::text NOT IN (SELECT unnest($1::text[]))
-                AND (
-                    ty.type_lesson = 'online'
-                    OR t.city = $2
+                WITH tutor_stats AS (
+                    SELECT
+                        t.id as tutor_id,
+                        t.name,
+                        t.email,
+                        t.gender,
+                        t.city,
+                        t.district,
+                        ty.id as tutories_id,
+                        c.name as category_name,
+                        ty.name as tutory_name,
+                        ty.about_you,
+                        ty.teaching_methodology,
+                        ty.hourly_rate,
+                        ty.type_lesson,
+                        COUNT(o.id) as total_orders,
+                        COUNT(CASE WHEN o.status = 'completed' THEN 1 END) as completed_orders,
+                        COALESCE(AVG(r.rating), 0) as avg_rating,
+                        COUNT(r.id) as review_count
+                    FROM tutors t
+                    INNER JOIN tutories ty ON t.id = ty.tutor_id
+                    INNER JOIN categories c ON ty.category_id = c.id
+                    LEFT JOIN orders o ON ty.id = o.tutories_id
+                    LEFT JOIN reviews r ON o.id = r.order_id
+                    WHERE ty.is_enabled = true
+                    AND t.id::text NOT IN (SELECT unnest($1::text[]))
+                    AND (
+                        ty.type_lesson = 'online'
+                        OR t.city = $2
+                    )
+                    GROUP BY
+                        t.id, t.name, t.email, t.gender, t.city, t.district,
+                        ty.id, c.name, ty.name, ty.about_you, ty.teaching_methodology,
+                        ty.hourly_rate, ty.type_lesson
                 )
-                GROUP BY t.id, ty.id, c.name
+                SELECT *
+                FROM tutor_stats
                 ORDER BY
-                    CASE WHEN t.city = $2 THEN 0 ELSE 1 END,
+                    CASE WHEN city = $2 THEN 0 ELSE 1 END,
                     completed_orders DESC,
                     total_orders DESC
                 LIMIT $3
