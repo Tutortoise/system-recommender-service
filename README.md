@@ -5,10 +5,11 @@ A real-time recommendation system (Online Learning) for tutories based on user i
 ## Features
 
 - Real-time recommendation updates based on user interactions
-- Text similarity using Word2Vec embeddings
+- Text similarity using GloVe embeddings
 - Location-based matching
 - Learning style compatibility
 - Dynamic price and rating considerations
+- High-performance ASGI server with Granian
 
 ## Environment Variables
 
@@ -28,6 +29,21 @@ SERVICE_HOST=0.0.0.0
 MODEL_UPDATE_INTERVAL=21600  # Model update interval in seconds
 INTERACTION_WEIGHT=0.3       # Weight for user interactions
 CLEANUP_INTERVAL=3600       # Cleanup interval for old interactions in seconds
+
+# Granian Server Settings
+GRANIAN_HOST=0.0.0.0
+GRANIAN_PORT=8000
+GRANIAN_INTERFACE=asgi
+GRANIAN_WORKERS_PER_CORE=2
+GRANIAN_MAX_WORKERS=4
+GRANIAN_MIN_WORKERS=2
+GRANIAN_HTTP=auto
+GRANIAN_BACKLOG=1024
+GRANIAN_LOG_LEVEL=info
+GRANIAN_LOG_ACCESS_ENABLED=true
+GRANIAN_THREADING_MODE=workers
+GRANIAN_LOOP=auto
+GRANIAN_HTTP1_KEEP_ALIVE=true
 ```
 
 ## API Endpoints
@@ -79,13 +95,36 @@ docker run -d \
   -e POSTGRES_USER=postgres \
   -e POSTGRES_PASSWORD=postgres \
   -e POSTGRES_DB=postgres \
+  -e GRANIAN_WORKERS_PER_CORE=2 \
+  -e GRANIAN_MAX_WORKERS=4 \
+  -e GRANIAN_LOG_LEVEL=info \
   recommender:latest
 ```
+
+## Server Configuration
+
+### Workers
+
+The number of workers is calculated based on:
+
+- Workers per CPU core (`GRANIAN_WORKERS_PER_CORE`)
+- Maximum workers (`GRANIAN_MAX_WORKERS`)
+- Minimum workers (`GRANIAN_MIN_WORKERS`)
+
+Formula: `min(max(CPU_CORES * WORKERS_PER_CORE, MIN_WORKERS), MAX_WORKERS)`
+
+### Performance Tuning
+
+- `GRANIAN_BACKLOG`: Connection queue size (default: 1024)
+- `GRANIAN_THREADING_MODE`: Worker threading mode (default: workers)
+- `GRANIAN_LOOP`: Event loop implementation (default: auto)
+- `GRANIAN_HTTP`: HTTP version (auto, h11, h2)
 
 ## Dependencies
 
 - FastAPI
 - VowpalWabbit
-- Gensim
+- Granian
 - PostgreSQL (asyncpg)
 - NumPy
+- GloVe embeddings (Manually converted to NumPy format)
