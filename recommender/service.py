@@ -547,38 +547,49 @@ class RecommenderService:
                 # Process features
                 learner_features = {}
                 for learner in learners:
-                    learner_features[learner["learner_id"]] = (
-                        self.feature_processor.process_user_features(
-                            {
-                                "learning_style": learner["learning_style"],
-                                "city": learner["city"],
-                                "district": learner["district"],
-                                "interests": learner["interests"],
-                            }
+                    if learner and learner.get("learner_id"):
+                        learner_features[learner["learner_id"]] = (
+                            self.feature_processor.process_user_features(
+                                {
+                                    "learning_style": learner.get("learning_style"),
+                                    "city": learner.get("city"),
+                                    "district": learner.get("district"),
+                                    "interests": learner.get("interests") or [],
+                                }
+                            )
                         )
-                    )
 
                 tutor_features = {}
                 for tutor in tutors:
-                    tutor_features[tutor["tutor_id"]] = (
-                        self.feature_processor.process_tutor_features(
-                            {"city": tutor["city"], "district": tutor["district"]},
-                            {
-                                "subject": tutor[
-                                    "category_name"
-                                ],  # Changed from subject_name
-                                "name": tutor["tutory_name"],  # Added tutory name
-                                "teaching_methodology": tutor["teaching_methodology"],
-                                "hourly_rate": float(tutor["hourly_rate"]),
-                                "type_lesson": tutor["type_lesson"],
-                            },
-                            {
-                                "avg_rating": float(tutor["avg_rating"] or 0),
-                                "completion_rate": float(tutor["completion_rate"]),
-                                "review_count": int(tutor["review_count"]),
-                            },
+                    if tutor and tutor.get("tutor_id"):
+                        tutor_features[tutor["tutor_id"]] = (
+                            self.feature_processor.process_tutor_features(
+                                {
+                                    "city": tutor.get("city"),
+                                    "district": tutor.get("district"),
+                                },
+                                {
+                                    "subject": tutor.get("category_name", ""),
+                                    "name": tutor.get("tutory_name", ""),
+                                    "teaching_methodology": tutor.get(
+                                        "teaching_methodology", ""
+                                    ),
+                                    "hourly_rate": float(tutor.get("hourly_rate", 0)),
+                                    "type_lesson": tutor.get("type_lesson", ""),
+                                },
+                                {
+                                    "avg_rating": float(
+                                        tutor.get("avg_rating", 0) or 0
+                                    ),
+                                    "completion_rate": float(
+                                        tutor.get("completion_rate", 0) or 0
+                                    ),
+                                    "review_count": int(
+                                        tutor.get("review_count", 0) or 0
+                                    ),
+                                },
+                            )
                         )
-                    )
 
                 # Update recommender
                 self.recommender.build_index(tutor_features)

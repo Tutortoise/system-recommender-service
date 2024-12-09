@@ -26,46 +26,48 @@ class FeatureProcessor:
             + 2  # ratings (avg_rating, completion_rate)
         )
 
-    def _get_text_vector(self, text: str) -> np.ndarray:
+    def _get_text_vector(self, text: str | None) -> np.ndarray:
         """Get averaged word vectors for text"""
         if not text:
             return np.zeros(self.vector_size)
 
-        words = text.lower().split()
-        vectors = []
+        try:
+            words = str(text).lower().split()
+            vectors = []
 
-        for word in words:
-            try:
-                vectors.append(self.subject_embedding.get_vector(word))
-            except KeyError:
-                continue
+            for word in words:
+                try:
+                    vectors.append(self.subject_embedding.get_vector(word))
+                except (KeyError, Exception):
+                    continue
 
-        if vectors:
-            return np.mean(vectors, axis=0)
-        return np.zeros(self.vector_size)
+            if vectors:
+                return np.mean(vectors, axis=0)
+            return np.zeros(self.vector_size)
+        except Exception:
+            return np.zeros(self.vector_size)
 
     def process_user_features(self, user_data: Dict) -> np.ndarray:
         if not self.is_fitted:
             raise ValueError("Feature processor not fitted")
 
         try:
-            # Process interests
             interest_vector = np.zeros(self.vector_size)
-            if user_data.get("interests"):
+            if user_data and user_data.get("interests"):
                 vectors = []
                 for interest in user_data["interests"]:
-                    vectors.append(self._get_text_vector(interest))
+                    if interest:
+                        vectors.append(self._get_text_vector(interest))
                 if vectors:
                     interest_vector = np.mean(vectors, axis=0)
 
-            # Process learning style
             learning_style_vec = self._encode_learning_style(
-                user_data.get("learning_style", "")
+                user_data.get("learning_style") if user_data else None
             )
 
-            # Process location
             location_vec = self._encode_location(
-                user_data.get("city", ""), user_data.get("district", "")
+                user_data.get("city") if user_data else None,
+                user_data.get("district") if user_data else None,
             )
 
             return np.concatenate(
@@ -132,7 +134,11 @@ class FeatureProcessor:
             logging.error(f"Feature processing error: {str(e)}", exc_info=True)
             raise
 
-    def _encode_learning_style(self, style: str) -> np.ndarray:
+    def _encode_learning_style(self, style: str | None) -> np.ndarray:
+        """One-hot encode learning style"""
+        if not style:
+            return np.array([0, 0, 0])
+
         styles = {
             "visual": [1, 0, 0],
             "auditory": [0, 1, 0],
@@ -148,13 +154,17 @@ class FeatureProcessor:
         }
         return np.array(types.get(lesson_type.lower(), [0, 0, 0]))
 
-    def _encode_location(self, city: str, district: str) -> np.ndarray:
+    def _encode_location(self, city: str | None, district: str | None) -> np.ndarray:
+        """Handle null/None location values"""
         if not city or not district:
             return np.zeros(2)
 
-        city_hash = hash(city.lower()) % 1000 / 1000
-        district_hash = hash(district.lower()) % 1000 / 1000
-        return np.array([city_hash, district_hash])
+        try:
+            city_hash = hash(str(city).lower()) % 1000 / 1000
+            district_hash = hash(str(district).lower()) % 1000 / 1000
+            return np.array([city_hash, district_hash])
+        except Exception:
+            return np.zeros(2)
 
     def _encode_price(self, hourly_rate: int) -> float:
         # Normalize price to 0-1 range (assuming max price is 1000)
