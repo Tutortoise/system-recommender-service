@@ -198,7 +198,12 @@ class RecommenderService:
                     availability_info = {
                         "can_teach_online": lesson_type in ["online", "both"],
                         "can_teach_offline": lesson_type in ["offline", "both"],
-                        "same_city": tutor["city"].lower() == learner["city"].lower(),
+                        "same_city": bool(
+                            tutor.get("city")
+                            and learner.get("city")
+                            and str(tutor["city"]).lower()
+                            == str(learner["city"]).lower()
+                        ),
                     }
 
                     match_reasons = self.feature_processor._get_match_reasons(
@@ -274,8 +279,12 @@ class RecommenderService:
                         availability_info = {
                             "can_teach_online": lesson_type in ["online", "both"],
                             "can_teach_offline": lesson_type in ["offline", "both"],
-                            "same_city": tutor["city"].lower()
-                            == learner["city"].lower(),
+                            "same_city": bool(
+                                tutor.get("city")
+                                and learner.get("city")
+                                and str(tutor["city"]).lower()
+                                == str(learner["city"]).lower()
+                            ),
                         }
 
                         match_reasons = self.feature_processor._get_match_reasons(
@@ -630,8 +639,23 @@ class RecommenderService:
 
     def _calculate_location_match(self, learner: Dict, tutor: Dict) -> float:
         """Calculate location match score"""
-        if learner["city"] == tutor["city"]:
-            if learner["district"] == tutor["district"]:
+        if not learner or not tutor:
+            return 0.0
+
+        learner_city = str(learner.get("city", "")).lower()
+        learner_district = str(learner.get("district", "")).lower()
+        tutor_city = str(tutor.get("city", "")).lower()
+        tutor_district = str(tutor.get("district", "")).lower()
+
+        if not learner_city or not tutor_city:
+            return 0.0
+
+        if learner_city == tutor_city:
+            if (
+                learner_district
+                and tutor_district
+                and learner_district == tutor_district
+            ):
                 return 1.0  # Perfect match - same district
             return 0.7  # Same city, different district
         return 0.0  # Different cities
