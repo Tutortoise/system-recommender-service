@@ -242,6 +242,10 @@ class RecommenderService:
                         "type_lesson": tutor["type_lesson"],
                         "completed_orders": int(tutor["completed_orders"]),
                         "total_orders": int(tutor["total_orders"]),
+                        "rating": {
+                            "average": float(tutor["avg_rating"] or 0),
+                            "total_reviews": int(tutor["review_count"] or 0)
+                        },
                         "match_reasons": match_reasons,
                         "location_match": location_match,
                         "availability": availability_info,
