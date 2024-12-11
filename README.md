@@ -1,5 +1,7 @@
 # Tutortoise Recommender System
 
+![](./service_architecture.jpg)
+
 A real-time recommendation system (Online Learning) for tutories based on user interactions and preferences. The system uses a hybrid approach combining collaborative filtering, content-based filtering, and location-based matching to provide personalized recommendations.
 
 ## Features
